@@ -42,6 +42,7 @@ interface WorkerRequest {
   generatedAtUnixNano?: string;
   scenario?: string;
   algorithm?: string;
+  dataStructure?: string;
   sinceUnixNano?: string;
   includeIds?: boolean;
   limit?: number;
@@ -54,6 +55,9 @@ let sortProfiles: Profile[] = [];
 let sortedProfiles: Profile[] = [];
 let sortedUpdatedNs: bigint[] = [];
 let profileMap = new Map<number, Profile>();
+let profileIDs: number[] = [];
+let sortedProfileIDs: number[] = [];
+let profileIDSet = new Set<number>();
 let buckets = new Map<bigint, number[]>();
 let minutes: bigint[] = [];
 let scoreBuckets: number[][] = Array.from({ length: MAX_SCORE + 1 }, () => []);
@@ -78,6 +82,8 @@ function buildDataset(count: number, generatedAtNs: bigint): void {
 
   profiles = [];
   profileMap = new Map<number, Profile>();
+  profileIDs = [];
+  profileIDSet = new Set<number>();
   buckets = new Map<bigint, number[]>();
   scoreBuckets = Array.from({ length: MAX_SCORE + 1 }, () => []);
 
@@ -100,6 +106,8 @@ function buildDataset(count: number, generatedAtNs: bigint): void {
     };
     profiles.push(profile);
     profileMap.set(id, profile);
+    profileIDs.push(id);
+    profileIDSet.add(id);
     const minute = updatedNs / 1_000_000_000n / 60n;
     const bucket = buckets.get(minute);
     if (bucket) bucket.push(id);
@@ -107,6 +115,7 @@ function buildDataset(count: number, generatedAtNs: bigint): void {
     scoreBuckets[score].push(id);
   }
 
+  sortedProfileIDs = [...profileIDs].sort((a, b) => a - b);
   sortedProfiles = [...profiles].sort((a, b) => {
     if (a.updatedNs === b.updatedNs) return a.id - b.id;
     return a.updatedNs < b.updatedNs ? -1 : 1;
@@ -187,6 +196,17 @@ function firstGreaterThan(values: bigint[], target: bigint): number {
   return low;
 }
 
+function firstNumberAtLeast(values: number[], target: number): number {
+  let low = 0;
+  let high = values.length;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (values[mid] >= target) high = mid;
+    else low = mid + 1;
+  }
+  return low;
+}
+
 function findBinarySearch(request: WorkerRequest): number[] {
   const sinceNs = BigInt(request.sinceUnixNano || "0");
   const index = firstGreaterThan(sortedUpdatedNs, sinceNs);
@@ -257,6 +277,63 @@ function findParallelScan(request: WorkerRequest): number[] {
   return parts.flat();
 }
 // snippet:parallel_scan:end
+
+function membershipCandidates(request: WorkerRequest): number[] {
+  const limit = request.limit && request.limit > 0 ? request.limit : 100;
+  const span = Math.max(1, profileIDs.length * 2);
+  return Array.from({ length: limit }, (_, i) => 1 + ((i * 7919) % span));
+}
+
+// snippet:scan_contains_slice:start
+function runScanContainsSlice(request: WorkerRequest): number[] {
+  const ids: number[] = [];
+  for (const candidate of membershipCandidates(request)) {
+    for (const id of profileIDs) {
+      if (id === candidate) {
+        ids.push(candidate);
+        break;
+      }
+    }
+  }
+  return ids;
+}
+// snippet:scan_contains_slice:end
+
+// snippet:scan_contains_sorted_slice:start
+function runScanContainsSortedSlice(request: WorkerRequest): number[] {
+  const ids: number[] = [];
+  for (const candidate of membershipCandidates(request)) {
+    for (const id of sortedProfileIDs) {
+      if (id === candidate) {
+        ids.push(candidate);
+        break;
+      }
+    }
+  }
+  return ids;
+}
+// snippet:scan_contains_sorted_slice:end
+
+// snippet:binary_search_contains_sorted_slice:start
+function runBinarySearchContainsSortedSlice(request: WorkerRequest): number[] {
+  const ids: number[] = [];
+  for (const candidate of membershipCandidates(request)) {
+    const index = firstNumberAtLeast(sortedProfileIDs, candidate);
+    if (index < sortedProfileIDs.length && sortedProfileIDs[index] === candidate) ids.push(candidate);
+  }
+  return ids;
+}
+// snippet:binary_search_contains_sorted_slice:end
+
+// snippet:direct_lookup_hash_set:start
+function runDirectLookupHashSet(request: WorkerRequest): number[] {
+  const ids: number[] = [];
+  for (const candidate of membershipCandidates(request)) {
+    if (profileIDSet.has(candidate)) ids.push(candidate);
+  }
+  return ids;
+}
+// snippet:direct_lookup_hash_set:end
 
 // snippet:top_k_full_sort:start
 function runTopKFullSort(request: WorkerRequest): number[] {
@@ -749,22 +826,40 @@ function containsBoyerMoore(text: string, pattern: string): boolean {
   return false;
 }
 
-const algorithms = new Map<string, Map<string, (request: WorkerRequest) => number[]>>([
-  ["lookup", new Map([
+type Runner = (request: WorkerRequest) => number[];
+
+function defaultDataStructures(runners: [string, Runner][]): Map<string, Map<string, Runner>> {
+  return new Map(runners.map(([name, runner]) => [name, new Map([["default", runner]])]));
+}
+
+const algorithms = new Map<string, Map<string, Map<string, Runner>>>([
+  ["lookup", defaultDataStructures([
     ["slice_scan", findSliceScan],
     ["binary_search", findBinarySearch],
     ["bucketed_index", findBucketedIndex],
     ["map_scan", findMapScan],
     ["parallel_scan", findParallelScan],
   ])],
-  ["top_k", new Map([
+  ["membership", new Map([
+    ["scan_contains", new Map([
+      ["slice", runScanContainsSlice],
+      ["sorted_slice", runScanContainsSortedSlice],
+    ])],
+    ["binary_search_contains", new Map([
+      ["sorted_slice", runBinarySearchContainsSortedSlice],
+    ])],
+    ["direct_lookup", new Map([
+      ["hash_set", runDirectLookupHashSet],
+    ])],
+  ])],
+  ["top_k", defaultDataStructures([
     ["top_k_full_sort", runTopKFullSort],
     ["top_k_min_heap", runTopKMinHeap],
     ["top_k_quickselect", runTopKQuickselect],
     ["top_k_bucketed", runTopKBucketed],
     ["top_k_streaming", runTopKStreaming],
   ])],
-  ["sorting", new Map([
+  ["sorting", defaultDataStructures([
     ["sort_insertion", runSortInsertion],
     ["sort_merge", runSortMerge],
     ["sort_quick", runSortQuick],
@@ -773,7 +868,7 @@ const algorithms = new Map<string, Map<string, (request: WorkerRequest) => numbe
     ["sort_radix", runSortRadix],
     ["sort_builtin", runSortBuiltin],
   ])],
-  ["caching", new Map([
+  ["caching", defaultDataStructures([
     ["cache_none", runCacheNone],
     ["cache_fifo", runCacheFIFO],
     ["cache_lru", runCacheLRU],
@@ -781,7 +876,7 @@ const algorithms = new Map<string, Map<string, (request: WorkerRequest) => numbe
     ["cache_random", runCacheRandom],
     ["cache_ttl", runCacheTTL],
   ])],
-  ["text_search", new Map([
+  ["text_search", defaultDataStructures([
     ["text_naive", runTextNaive],
     ["text_lowercase", runTextLowercase],
     ["text_kmp", runTextKMP],
@@ -797,8 +892,9 @@ function writeResponse(value: unknown): void {
 
 function handleRun(request: WorkerRequest): unknown {
   const scenario = request.scenario || "lookup";
-  const runner = algorithms.get(scenario)?.get(request.algorithm || "");
-  if (!runner) return { id: request.id, ok: false, error: "unknown algorithm" };
+  const dataStructure = request.dataStructure || "default";
+  const runner = algorithms.get(scenario)?.get(request.algorithm || "")?.get(dataStructure);
+  if (!runner) return { id: request.id, ok: false, error: "unknown implementation" };
 
   const started = performance.now();
   const ids = runner(request);

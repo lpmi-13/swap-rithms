@@ -146,7 +146,7 @@ func TestLabCanServeSelectedLanguageRuntime(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Scenario != scenarioLookup || response.Language != languagePython || response.Algorithm != "binary_search" || response.Implementation != "lookup:python:binary_search" {
+	if response.Scenario != scenarioLookup || response.Language != languagePython || response.Algorithm != "binary_search" || response.DataStructure != defaultDataStructure || response.Implementation != "lookup:python:binary_search:default" {
 		t.Fatalf("unexpected implementation in response: %+v", response)
 	}
 	if response.ElapsedMicros <= 0 {
@@ -154,8 +154,111 @@ func TestLabCanServeSelectedLanguageRuntime(t *testing.T) {
 	}
 
 	stats := lab.metrics.Snapshot()
-	if stats.Algorithms["lookup:python:binary_search"].Requests != 1 {
-		t.Fatalf("expected metric for lookup:python:binary_search, got %+v", stats.Algorithms)
+	if stats.Algorithms["lookup:python:binary_search:default"].Requests != 1 {
+		t.Fatalf("expected metric for lookup:python:binary_search:default, got %+v", stats.Algorithms)
+	}
+}
+
+func TestScenarioMetadataIncludesAxesAndImplementations(t *testing.T) {
+	dataset := NewDataset(500)
+	scenarios, _ := NewScenarioRegistry(dataset)
+
+	lookup := scenarios[scenarioLookup]
+	if lookup.DefaultDataStructure != defaultDataStructure {
+		t.Fatalf("lookup default data structure = %q, want %q", lookup.DefaultDataStructure, defaultDataStructure)
+	}
+	if findImplementation(lookup, lookup.DefaultAlgorithm, lookup.DefaultDataStructure) == nil {
+		t.Fatal("lookup default implementation is not valid")
+	}
+
+	membership := scenarios[scenarioMembership]
+	if membership.DefaultAlgorithm != defaultMembershipAlgorithm || membership.DefaultDataStructure != "slice" {
+		t.Fatalf("unexpected membership defaults: %s/%s", membership.DefaultAlgorithm, membership.DefaultDataStructure)
+	}
+	if len(membership.Axes.Algorithms) != 3 || len(membership.Axes.DataStructures) != 3 {
+		t.Fatalf("unexpected membership axes: %+v", membership.Axes)
+	}
+	if findImplementation(membership, "binary_search_contains", "sorted_slice") == nil {
+		t.Fatal("expected binary_search_contains/sorted_slice implementation")
+	}
+	if validAxisSelection(membership, "direct_lookup", "sorted_slice") {
+		t.Fatal("direct_lookup/sorted_slice should be invalid")
+	}
+}
+
+func TestImplementationEndpointSwitchesDataStructure(t *testing.T) {
+	dataset := NewDataset(1_000)
+	lab := NewLab(dataset, "http://127.0.0.1:0")
+	defer lab.Close()
+
+	req := mustRequest(t, "/api/implementation")
+	req.Method = http.MethodPost
+	req.Body = io.NopCloser(strings.NewReader(`{"scenario":"membership","language":"go","algorithm":"binary_search_contains","dataStructure":"sorted_slice"}`))
+	rec := httptest.NewRecorder()
+	lab.handleImplementation(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var response StateResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.ActiveScenario != scenarioMembership || response.ActiveAlgorithm != "binary_search_contains" || response.ActiveDataStructure != "sorted_slice" {
+		t.Fatalf("unexpected active implementation: %+v", response)
+	}
+	if response.ActiveImplementation != "membership:go:binary_search_contains:sorted_slice" {
+		t.Fatalf("active implementation = %q", response.ActiveImplementation)
+	}
+
+	req = mustRequest(t, "/api/implementation")
+	req.Method = http.MethodPost
+	req.Body = io.NopCloser(strings.NewReader(`{"scenario":"membership","language":"go","algorithm":"direct_lookup","dataStructure":"sorted_slice"}`))
+	rec = httptest.NewRecorder()
+	lab.handleImplementation(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid pair status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAlgorithmEndpointUsesDefaultDataStructure(t *testing.T) {
+	dataset := NewDataset(1_000)
+	lab := NewLab(dataset, "http://127.0.0.1:0")
+	defer lab.Close()
+
+	req := mustRequest(t, "/api/algorithm")
+	req.Method = http.MethodPost
+	req.Body = io.NopCloser(strings.NewReader(`{"scenario":"membership","language":"go","name":"scan_contains"}`))
+	rec := httptest.NewRecorder()
+	lab.handleAlgorithm(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var response StateResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.ActiveDataStructure != "slice" || response.ActiveImplementation != "membership:go:scan_contains:slice" {
+		t.Fatalf("unexpected legacy wrapper selection: %+v", response)
+	}
+}
+
+func TestPrometheusMetricsUseStructuredImplementationLabels(t *testing.T) {
+	metrics := NewMetrics()
+	metrics.Observe(scenarioMembership, languageGo, "direct_lookup", "hash_set", time.Millisecond)
+
+	text := metrics.PrometheusText("membership:go:direct_lookup:hash_set", RuntimeStats{CPUPercent: -1}, LoadGeneratorState{})
+	for _, want := range []string{
+		`scenario="membership"`,
+		`language="go"`,
+		`algorithm="direct_lookup"`,
+		`data_structure="hash_set"`,
+		`implementation="membership:go:direct_lookup:hash_set"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("prometheus output missing %s:\n%s", want, text)
+		}
 	}
 }
 
@@ -186,11 +289,11 @@ func TestScenarioAlgorithmsReturnEquivalentIDs(t *testing.T) {
 	for _, scenarioName := range order {
 		scenario := scenarios[scenarioName]
 		request := testScenarioRequest(dataset, scenarioName)
-		want := scenario.Algorithms[scenario.Order[0]].Run(request)
-		for _, algorithmName := range scenario.Order[1:] {
-			got := scenario.Algorithms[algorithmName].Run(request)
+		want := scenario.Implementations[scenario.ImplementationOrder[0]].Run(request)
+		for _, implementationName := range scenario.ImplementationOrder[1:] {
+			got := scenario.Implementations[implementationName].Run(request)
 			if !scenario.Verify(got, want) {
-				t.Fatalf("%s/%s returned different ids: got %v want %v", scenarioName, algorithmName, got[:min(len(got), 5)], want[:min(len(want), 5)])
+				t.Fatalf("%s/%s returned different ids: got %v want %v", scenarioName, implementationName, got[:min(len(got), 5)], want[:min(len(want), 5)])
 			}
 		}
 	}
@@ -202,14 +305,14 @@ func TestScenarioAlgorithmInfoIncludesSourceCode(t *testing.T) {
 
 	for _, scenarioName := range order {
 		scenario := scenarios[scenarioName]
-		for _, algorithmName := range scenario.Order {
-			info := algorithmInfo(scenario.Algorithms[algorithmName])
+		for _, implementationName := range scenario.ImplementationOrder {
+			info := implementationInfo(scenario.Implementations[implementationName])
 			if info.Code == "" {
-				t.Fatalf("%s/%s has no Go source code snippet", scenarioName, algorithmName)
+				t.Fatalf("%s/%s has no Go source code snippet", scenarioName, implementationName)
 			}
 			for _, language := range []string{languageGo, languagePython, languageTypeScript} {
 				if info.CodeByLanguage[language] == "" {
-					t.Fatalf("%s/%s has no %s source code snippet", scenarioName, algorithmName, language)
+					t.Fatalf("%s/%s has no %s source code snippet", scenarioName, implementationName, language)
 				}
 			}
 		}
@@ -219,11 +322,11 @@ func TestScenarioAlgorithmInfoIncludesSourceCode(t *testing.T) {
 func TestWorkerRuntimesReturnSameScenarioResults(t *testing.T) {
 	dataset := NewDataset(750)
 	scenarios, order := NewScenarioRegistry(dataset)
-	goAlgorithms := make(map[string]map[string]ScenarioAlgorithm, len(scenarios))
+	goImplementations := make(map[string]map[string]ScenarioImplementation, len(scenarios))
 	for name, scenario := range scenarios {
-		goAlgorithms[name] = scenario.Algorithms
+		goImplementations[name] = scenario.Implementations
 	}
-	goRuntime := NewGoRuntime(goAlgorithms)
+	goRuntime := NewGoRuntime(goImplementations)
 	runtimes := []FinderRuntime{
 		NewPythonRuntime(dataset),
 		NewTypeScriptRuntime(dataset),
@@ -245,20 +348,21 @@ func TestWorkerRuntimesReturnSameScenarioResults(t *testing.T) {
 		for _, scenarioName := range order {
 			scenario := scenarios[scenarioName]
 			request := testScenarioRequest(dataset, scenarioName)
-			for _, algorithmName := range scenario.Order {
-				want, err := goRuntime.Run(scenarioName, algorithmName, request)
+			for _, implementationName := range scenario.ImplementationOrder {
+				implementation := scenario.Implementations[implementationName]
+				want, err := goRuntime.Run(scenarioName, implementation.Algorithm(), implementation.DataStructure(), request)
 				if err != nil {
 					t.Fatal(err)
 				}
-				got, err := runtime.Run(scenarioName, algorithmName, request)
+				got, err := runtime.Run(scenarioName, implementation.Algorithm(), implementation.DataStructure(), request)
 				if err != nil {
-					t.Fatalf("%s %s/%s returned error: %v", runtime.Name(), scenarioName, algorithmName, err)
+					t.Fatalf("%s %s/%s returned error: %v", runtime.Name(), scenarioName, implementationName, err)
 				}
 				if got.Count != want.Count {
-					t.Fatalf("%s %s/%s returned count %d, want %d", runtime.Name(), scenarioName, algorithmName, got.Count, want.Count)
+					t.Fatalf("%s %s/%s returned count %d, want %d", runtime.Name(), scenarioName, implementationName, got.Count, want.Count)
 				}
 				if !scenario.Verify(got.IDs, want.IDs) {
-					t.Fatalf("%s %s/%s returned different ids: got %v want %v", runtime.Name(), scenarioName, algorithmName, got.IDs[:min(len(got.IDs), 5)], want.IDs[:min(len(want.IDs), 5)])
+					t.Fatalf("%s %s/%s returned different ids: got %v want %v", runtime.Name(), scenarioName, implementationName, got.IDs[:min(len(got.IDs), 5)], want.IDs[:min(len(want.IDs), 5)])
 				}
 			}
 		}
@@ -406,6 +510,11 @@ func testScenarioRequest(dataset *Dataset, scenario string) ScenarioRequest {
 	case scenarioLookup:
 		return ScenarioRequest{
 			Since:      dataset.GeneratedAt.Add(-5 * time.Minute),
+			IncludeIDs: true,
+		}
+	case scenarioMembership:
+		return ScenarioRequest{
+			Limit:      200,
 			IncludeIDs: true,
 		}
 	case scenarioTopK:

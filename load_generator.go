@@ -294,6 +294,8 @@ func (g *LoadGenerator) loadURL(req LoadRequest) (string, error) {
 	switch scenario {
 	case scenarioLookup:
 		query.Set("window", fmt.Sprintf("%ds", value))
+	case scenarioMembership:
+		query.Set("limit", fmt.Sprintf("%d", value))
 	case scenarioTopK:
 		query.Set("k", fmt.Sprintf("%d", value))
 	case scenarioSorting:

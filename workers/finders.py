@@ -21,6 +21,9 @@ sort_profiles = []
 sorted_profiles = []
 sorted_updated_ns = []
 profile_map = {}
+profile_ids = []
+sorted_profile_ids = []
+profile_ids_set = set()
 buckets = {}
 minutes = []
 score_buckets = [[] for _ in range(MAX_SCORE + 1)]
@@ -45,11 +48,14 @@ CACHE_TTL_SECONDS = 60
 def build_dataset(count, generated_at_ns):
     global profiles, sort_profiles, sorted_profiles, sorted_updated_ns, profile_map, buckets, minutes
     global score_buckets, sort_score_buckets, search_docs, docs_by_id, prefix_index, inverted_index
+    global profile_ids, sorted_profile_ids, profile_ids_set
 
     step_ns = DAY_NS // max(count, 1)
     signup_step_ns = SIGNUP_WINDOW_NS // max(count, 1)
     profiles = []
     profile_map = {}
+    profile_ids = []
+    profile_ids_set = set()
     buckets = {}
     score_buckets = [[] for _ in range(MAX_SCORE + 1)]
 
@@ -72,10 +78,13 @@ def build_dataset(count, generated_at_ns):
         }
         profiles.append(profile)
         profile_map[profile_id] = profile
+        profile_ids.append(profile_id)
+        profile_ids_set.add(profile_id)
         minute = (updated_ns // 1_000_000_000) // 60
         buckets.setdefault(minute, []).append(profile_id)
         score_buckets[score].append(profile_id)
 
+    sorted_profile_ids = sorted(profile_ids)
     sorted_profiles = sorted(profiles, key=lambda profile: (profile["updated_ns"], profile["id"]))
     sorted_updated_ns = [profile["updated_ns"] for profile in sorted_profiles]
     minutes = sorted(buckets.keys())
@@ -208,6 +217,59 @@ def find_parallel_scan(request):
             ids.extend(part)
     return ids
 # snippet:parallel_scan:end
+
+
+def membership_candidates(request):
+    limit = int(request.get("limit", 100))
+    if limit <= 0:
+        limit = 100
+    span = max(1, len(profile_ids) * 2)
+    return [1 + ((i * 7919) % span) for i in range(limit)]
+
+
+# snippet:scan_contains_slice:start
+def run_scan_contains_slice(request):
+    ids = []
+    for candidate in membership_candidates(request):
+        for profile_id in profile_ids:
+            if profile_id == candidate:
+                ids.append(candidate)
+                break
+    return ids
+# snippet:scan_contains_slice:end
+
+
+# snippet:scan_contains_sorted_slice:start
+def run_scan_contains_sorted_slice(request):
+    ids = []
+    for candidate in membership_candidates(request):
+        for profile_id in sorted_profile_ids:
+            if profile_id == candidate:
+                ids.append(candidate)
+                break
+    return ids
+# snippet:scan_contains_sorted_slice:end
+
+
+# snippet:binary_search_contains_sorted_slice:start
+def run_binary_search_contains_sorted_slice(request):
+    ids = []
+    for candidate in membership_candidates(request):
+        index = bisect.bisect_left(sorted_profile_ids, candidate)
+        if index < len(sorted_profile_ids) and sorted_profile_ids[index] == candidate:
+            ids.append(candidate)
+    return ids
+# snippet:binary_search_contains_sorted_slice:end
+
+
+# snippet:direct_lookup_hash_set:start
+def run_direct_lookup_hash_set(request):
+    ids = []
+    for candidate in membership_candidates(request):
+        if candidate in profile_ids_set:
+            ids.append(candidate)
+    return ids
+# snippet:direct_lookup_hash_set:end
 
 
 # snippet:top_k_full_sort:start
@@ -661,22 +723,38 @@ def contains_boyer_moore(text, pattern):
     return False
 
 
+def default_data_structures(runners):
+    return {name: {"default": runner} for name, runner in runners.items()}
+
+
 algorithms = {
-    "lookup": {
+    "lookup": default_data_structures({
         "slice_scan": find_slice_scan,
         "binary_search": find_binary_search,
         "bucketed_index": find_bucketed_index,
         "map_scan": find_map_scan,
         "parallel_scan": find_parallel_scan,
+    }),
+    "membership": {
+        "scan_contains": {
+            "slice": run_scan_contains_slice,
+            "sorted_slice": run_scan_contains_sorted_slice,
+        },
+        "binary_search_contains": {
+            "sorted_slice": run_binary_search_contains_sorted_slice,
+        },
+        "direct_lookup": {
+            "hash_set": run_direct_lookup_hash_set,
+        },
     },
-    "top_k": {
+    "top_k": default_data_structures({
         "top_k_full_sort": run_top_k_full_sort,
         "top_k_min_heap": run_top_k_min_heap,
         "top_k_quickselect": run_top_k_quickselect,
         "top_k_bucketed": run_top_k_bucketed,
         "top_k_streaming": run_top_k_streaming,
-    },
-    "sorting": {
+    }),
+    "sorting": default_data_structures({
         "sort_insertion": run_sort_insertion,
         "sort_merge": run_sort_merge,
         "sort_quick": run_sort_quick,
@@ -684,23 +762,23 @@ algorithms = {
         "sort_counting": run_sort_counting,
         "sort_radix": run_sort_radix,
         "sort_builtin": run_sort_builtin,
-    },
-    "caching": {
+    }),
+    "caching": default_data_structures({
         "cache_none": run_cache_none,
         "cache_fifo": run_cache_fifo,
         "cache_lru": run_cache_lru,
         "cache_lfu": run_cache_lfu,
         "cache_random": run_cache_random,
         "cache_ttl": run_cache_ttl,
-    },
-    "text_search": {
+    }),
+    "text_search": default_data_structures({
         "text_naive": run_text_naive,
         "text_lowercase": run_text_lowercase,
         "text_kmp": run_text_kmp,
         "text_boyer_moore": run_text_boyer_moore,
         "text_trie_prefix": run_text_trie_prefix,
         "text_inverted_index": run_text_inverted_index,
-    },
+    }),
 }
 
 
@@ -712,9 +790,10 @@ def write_response(value):
 def handle_run(request):
     scenario = request.get("scenario") or "lookup"
     algorithm = request.get("algorithm", "")
-    runner = algorithms.get(scenario, {}).get(algorithm)
+    data_structure = request.get("dataStructure") or "default"
+    runner = algorithms.get(scenario, {}).get(algorithm, {}).get(data_structure)
     if runner is None:
-        return {"id": request.get("id"), "ok": False, "error": "unknown algorithm"}
+        return {"id": request.get("id"), "ok": False, "error": "unknown implementation"}
 
     started_ns = time.perf_counter_ns()
     ids = runner(request)

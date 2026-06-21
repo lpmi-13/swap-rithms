@@ -72,6 +72,44 @@ var indexHTML = []byte(`<!doctype html>
       display: inline-flex;
       align-items: center;
     }
+    .focus-row {
+      margin-bottom: 12px;
+    }
+    .focus-label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .focus-control {
+      display: inline-flex;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      overflow: hidden;
+      background: #fff;
+    }
+    .segment {
+      min-height: 32px;
+      border: 0;
+      border-right: 1px solid var(--line);
+      border-radius: 0;
+      background: #fff;
+      color: var(--muted);
+      padding: 0 10px;
+      font-size: 12px;
+    }
+    .segment:last-child {
+      border-right: 0;
+    }
+    .segment.selected {
+      background: var(--accent);
+      color: #fff;
+    }
+    .segment:disabled {
+      background: #f3f5f8;
+      color: var(--muted);
+      cursor: not-allowed;
+      opacity: 0.65;
+    }
     label {
       display: grid;
       gap: 5px;
@@ -287,6 +325,11 @@ var indexHTML = []byte(`<!doctype html>
       color: var(--accent-dark);
       font-weight: 700;
     }
+    .implementation-meta {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
     .badge {
       border: 1px solid var(--line);
       border-radius: 999px;
@@ -416,6 +459,14 @@ var indexHTML = []byte(`<!doctype html>
     <section class="grid top-grid">
       <div class="panel">
         <h2>Implementation</h2>
+        <div class="row focus-row">
+          <span class="focus-label">Focus</span>
+          <div class="focus-control" role="group" aria-label="Focus mode">
+            <button class="segment selected" type="button" data-focus="implementation">Implementation</button>
+            <button class="segment" type="button" data-focus="algorithms">Algorithms</button>
+            <button class="segment" type="button" data-focus="data_structures">Data structures</button>
+          </div>
+        </div>
         <div class="row control-row">
           <label>
             Scenario
@@ -426,8 +477,12 @@ var indexHTML = []byte(`<!doctype html>
             <select id="language"></select>
           </label>
           <label>
-            Active algorithm
+            Algorithm
             <select id="algorithm"></select>
+          </label>
+          <label>
+            Data structure
+            <select id="dataStructure"></select>
           </label>
           <button id="applyAlgorithm">Apply</button>
           <span class="muted" id="profileCount"></span>
@@ -480,7 +535,7 @@ var indexHTML = []byte(`<!doctype html>
             <button id="stopLoad" class="danger">Stop</button>
             <span class="status"><span id="loadDot" class="dot"></span><span id="loadStatus">idle</span></span>
           </div>
-          <footer id="loadHint">Recent window sets the <code>/profiles/recent?window=</code> lookup and the chart history horizon. The shown latency is measured from real algorithm executions.</footer>
+          <footer id="loadHint">Recent window sets the <code>/profiles/recent?window=</code> lookup and the chart history horizon. The shown latency is measured from real implementation executions.</footer>
         </div>
       </div>
     </section>
@@ -509,12 +564,16 @@ var indexHTML = []byte(`<!doctype html>
       activeScenario: "lookup",
       activeLanguage: "go",
       activeAlgorithm: "slice_scan",
-      activeImplementation: "lookup:go:slice_scan",
+      activeDataStructure: "default",
+      activeImplementation: "lookup:go:slice_scan:default",
       selectedScenario: "lookup",
       selectedLanguage: "go",
       selectedAlgorithm: "slice_scan",
+      selectedDataStructure: "default",
+      focusMode: "implementation",
       scenarios: [],
       languages: [],
+      implementations: [],
       algorithms: [],
       rpsHistory: [],
       latencyHistory: [],
@@ -549,17 +608,21 @@ var indexHTML = []byte(`<!doctype html>
       state.activeScenario = data.activeScenario;
       state.activeLanguage = data.activeLanguage;
       state.activeAlgorithm = data.activeAlgorithm;
+      state.activeDataStructure = data.activeDataStructure || "default";
       state.activeImplementation = data.activeImplementation;
       state.scenarios = data.scenarios || [];
       state.languages = data.languages || [];
-      state.algorithms = data.algorithms || [];
+      state.implementations = data.implementations || data.algorithms || [];
+      state.algorithms = data.algorithms || state.implementations;
       state.selectedScenario = data.activeScenario;
       state.selectedLanguage = data.activeLanguage;
       state.selectedAlgorithm = data.activeAlgorithm;
+      state.selectedDataStructure = state.activeDataStructure;
       $("profileCount").textContent = fmt.format(data.profileCount) + " profiles";
       renderScenarioControls();
       renderScenarioRequestControls(false);
       renderLanguageControls();
+      renderFocusControls();
       renderAlgorithmControls();
       renderLoad(data.load);
     }
@@ -572,14 +635,116 @@ var indexHTML = []byte(`<!doctype html>
         businessCase: "Example: power an operations dashboard that asks which accounts changed in the last 5 minutes.",
         endpoint: "/profiles/recent",
         defaultAlgorithm: "slice_scan",
+        defaultDataStructure: "default",
+        axes: {
+          algorithms: [{ name: "slice_scan", label: "Slice scan", description: "Scan profiles in order." }],
+          dataStructures: [{ name: "default", label: "Default backing structure", description: "Default backing structure." }]
+        },
+        implementations: state.implementations,
         algorithms: state.algorithms,
         request: { label: "Recent window seconds", unit: "seconds", min: 1, max: 86400, default: 300, help: "Allowed range: 1 to 86,400 seconds." }
       };
     }
 
+    function scenarioImplementations() {
+      const scenario = currentScenario();
+      return scenario.implementations || scenario.algorithms || state.implementations || state.algorithms || [];
+    }
+
     function scenarioAlgorithms() {
       const scenario = currentScenario();
-      return scenario.algorithms || state.algorithms || [];
+      const axis = scenario.axes && scenario.axes.algorithms;
+      if (axis && axis.length) return axis;
+      return uniqueAxisOptions("algorithm");
+    }
+
+    function scenarioDataStructures() {
+      const scenario = currentScenario();
+      const axis = scenario.axes && scenario.axes.dataStructures;
+      if (axis && axis.length) return axis;
+      return uniqueAxisOptions("dataStructure");
+    }
+
+    function uniqueAxisOptions(field) {
+      const seen = new Set();
+      const options = [];
+      for (const implementation of scenarioImplementations()) {
+        const name = implementation[field];
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        options.push({
+          name,
+          label: field === "dataStructure" ? name.replaceAll("_", " ") : implementation.label,
+          description: implementation.description || ""
+        });
+      }
+      return options;
+    }
+
+    function findImplementation(algorithm = state.selectedAlgorithm, dataStructure = state.selectedDataStructure) {
+      return scenarioImplementations().find((implementation) => {
+        return implementation.algorithm === algorithm && implementation.dataStructure === dataStructure;
+      });
+    }
+
+    function implementationsForAlgorithm(algorithm) {
+      return scenarioImplementations().filter((implementation) => implementation.algorithm === algorithm);
+    }
+
+    function implementationsForDataStructure(dataStructure) {
+      return scenarioImplementations().filter((implementation) => implementation.dataStructure === dataStructure);
+    }
+
+    function ensureSelectedPair(changed = "") {
+      const scenario = currentScenario();
+      const implementations = scenarioImplementations();
+      if (!implementations.length) return;
+
+      if (!state.selectedAlgorithm) state.selectedAlgorithm = scenario.defaultAlgorithm || implementations[0].algorithm;
+      if (!state.selectedDataStructure) state.selectedDataStructure = scenario.defaultDataStructure || implementations[0].dataStructure;
+      if (findImplementation()) return;
+
+      let candidate;
+      if (changed === "algorithm") {
+        candidate = implementations.find((implementation) => {
+          return implementation.algorithm === state.selectedAlgorithm && implementation.dataStructure === scenario.defaultDataStructure;
+        }) || implementationsForAlgorithm(state.selectedAlgorithm)[0];
+      } else if (changed === "dataStructure") {
+        candidate = implementations.find((implementation) => {
+          return implementation.dataStructure === state.selectedDataStructure && implementation.algorithm === scenario.defaultAlgorithm;
+        }) || implementationsForDataStructure(state.selectedDataStructure)[0];
+      } else {
+        candidate = implementations.find((implementation) => {
+          return implementation.algorithm === scenario.defaultAlgorithm && implementation.dataStructure === scenario.defaultDataStructure;
+        }) || implementations[0];
+      }
+
+      if (candidate) {
+        state.selectedAlgorithm = candidate.algorithm;
+        state.selectedDataStructure = candidate.dataStructure;
+      }
+    }
+
+    function visibleImplementations() {
+      const implementations = scenarioImplementations();
+      if (state.focusMode === "algorithms") {
+        return implementations.filter((implementation) => implementation.dataStructure === state.selectedDataStructure);
+      }
+      if (state.focusMode === "data_structures") {
+        return implementations.filter((implementation) => implementation.algorithm === state.selectedAlgorithm);
+      }
+      return implementations;
+    }
+
+    function hasDataStructureAxis() {
+      const names = new Set(scenarioImplementations().map((implementation) => implementation.dataStructure));
+      return names.size > 1;
+    }
+
+    function normalizeFocusMode() {
+      if (!hasDataStructureAxis() && state.focusMode !== "implementation") {
+        state.focusMode = "implementation";
+      }
     }
 
     function renderScenarioControls() {
@@ -615,45 +780,82 @@ var indexHTML = []byte(`<!doctype html>
       }
     }
 
+    function renderFocusControls() {
+      normalizeFocusMode();
+      const hasAxis = hasDataStructureAxis();
+      for (const button of document.querySelectorAll("[data-focus]")) {
+        button.disabled = button.dataset.focus !== "implementation" && !hasAxis;
+        button.title = button.disabled ? "This scenario only has one backing data structure." : "";
+        button.classList.toggle("selected", button.dataset.focus === state.focusMode);
+      }
+    }
+
     function renderAlgorithmControls() {
+      normalizeFocusMode();
       const algorithms = scenarioAlgorithms();
-      state.algorithms = algorithms;
+      const dataStructures = scenarioDataStructures();
+      state.implementations = scenarioImplementations();
+      state.algorithms = state.implementations;
+      ensureSelectedPair();
+
       const select = $("algorithm");
       select.innerHTML = "";
       for (const algo of algorithms) {
         const option = document.createElement("option");
         option.value = algo.name;
-        option.textContent = algo.label + " (" + algo.complexity + ")";
+        option.textContent = algo.label;
+        option.title = algo.description || "";
+        option.disabled = implementationsForAlgorithm(algo.name).length === 0 || (state.focusMode === "algorithms" && !findImplementation(algo.name, state.selectedDataStructure));
         option.selected = algo.name === state.selectedAlgorithm;
         select.appendChild(option);
       }
+
+      const dataStructureSelect = $("dataStructure");
+      dataStructureSelect.innerHTML = "";
+      for (const dataStructure of dataStructures) {
+        const option = document.createElement("option");
+        option.value = dataStructure.name;
+        option.textContent = dataStructure.label;
+        option.title = dataStructure.description || "";
+        option.disabled = !findImplementation(state.selectedAlgorithm, dataStructure.name);
+        option.selected = dataStructure.name === state.selectedDataStructure;
+        dataStructureSelect.appendChild(option);
+      }
+      dataStructureSelect.disabled = !hasDataStructureAxis();
       renderAlgorithmList();
     }
 
     function renderAlgorithmList() {
       const list = $("algorithmList");
       const existing = list.querySelectorAll(".algorithm");
-      const algorithms = scenarioAlgorithms();
-      if (existing.length === algorithms.length && list.dataset.scenario === state.selectedScenario) {
+      const implementations = visibleImplementations();
+      const listKey = [state.selectedScenario, state.focusMode, state.selectedAlgorithm, state.selectedDataStructure].join("|");
+      if (existing.length === implementations.length && list.dataset.key === listKey) {
         updateAlgorithmCards();
         return;
       }
 
       list.innerHTML = "";
-      list.dataset.scenario = state.selectedScenario;
-      for (const algo of algorithms) {
+      list.dataset.key = listKey;
+      for (const implementation of implementations) {
         const div = document.createElement("div");
         div.className = "algorithm";
-        div.dataset.algorithm = algo.name;
+        div.dataset.implementation = implementation.name;
+        div.dataset.algorithm = implementation.algorithm;
+        div.dataset.dataStructure = implementation.dataStructure;
         div.innerHTML = [
           "<div class='algorithm-head'><strong></strong><span class='badge empty'></span></div>",
+          "<div class='implementation-meta'><span class='badge'></span><span class='badge'></span></div>",
           "<span class='complexity'></span>",
           "<span class='muted'></span>",
           "<div class='code-expander'><div class='code-expander-inner'><pre><code></code></pre></div></div>"
         ].join("");
-        div.querySelector("strong").textContent = algo.label;
-        div.querySelector(".complexity").innerHTML = "<code>" + algo.complexity + "</code>";
-        div.querySelector(".muted").textContent = algo.description;
+        div.querySelector("strong").textContent = implementation.label;
+        const meta = div.querySelectorAll(".implementation-meta .badge");
+        meta[0].textContent = implementation.algorithm.replaceAll("_", " ");
+        meta[1].textContent = implementation.dataStructure.replaceAll("_", " ");
+        div.querySelector(".complexity").innerHTML = "<code>" + implementation.complexity + "</code>";
+        div.querySelector(".muted").textContent = implementation.description;
         list.appendChild(div);
       }
       requestAnimationFrame(updateAlgorithmCards);
@@ -661,13 +863,13 @@ var indexHTML = []byte(`<!doctype html>
 
     function updateAlgorithmCards() {
       for (const card of $("algorithmList").querySelectorAll(".algorithm")) {
-        const isSelected = card.dataset.algorithm === state.selectedAlgorithm;
-        const isRunning = state.selectedScenario === state.activeScenario && card.dataset.algorithm === state.activeAlgorithm && state.selectedLanguage === state.activeLanguage;
+        const isSelected = card.dataset.algorithm === state.selectedAlgorithm && card.dataset.dataStructure === state.selectedDataStructure;
+        const isRunning = state.selectedScenario === state.activeScenario && card.dataset.algorithm === state.activeAlgorithm && card.dataset.dataStructure === state.activeDataStructure && state.selectedLanguage === state.activeLanguage;
         card.classList.toggle("selected", isSelected);
 
-        const algo = scenarioAlgorithms().find((candidate) => candidate.name === card.dataset.algorithm) || {};
-        const codes = algo.codeByLanguage || {};
-        card.querySelector("pre code").textContent = codes[state.selectedLanguage] || algo.code || "Source snippet unavailable.";
+        const implementation = scenarioImplementations().find((candidate) => candidate.name === card.dataset.implementation) || {};
+        const codes = implementation.codeByLanguage || {};
+        card.querySelector("pre code").textContent = codes[state.selectedLanguage] || implementation.code || "Source snippet unavailable.";
 
         const badge = card.querySelector(".badge");
         badge.textContent = isRunning ? "Running" : "";
@@ -767,7 +969,7 @@ var indexHTML = []byte(`<!doctype html>
       }
 
       const endpoint = scenario.endpoint || "/profiles/recent";
-      $("loadHint").innerHTML = "Load calls <code>" + endpoint + "</code> for the selected scenario. The shown latency is measured from real algorithm executions.";
+      $("loadHint").innerHTML = "Load calls <code>" + endpoint + "</code> for the selected scenario. The shown latency is measured from real implementation executions.";
     }
 
     function setFieldValidity(id, message) {
@@ -813,6 +1015,7 @@ var indexHTML = []byte(`<!doctype html>
       state.activeScenario = data.activeScenario;
       state.activeLanguage = data.activeLanguage;
       state.activeAlgorithm = data.activeAlgorithm;
+      state.activeDataStructure = data.activeDataStructure || "default";
       state.activeImplementation = data.activeImplementation;
       const active = data.algorithms[data.activeImplementation] || {};
       $("rps").textContent = fmt.format(active.recentRps || 0) + " rps";
@@ -1067,9 +1270,15 @@ var indexHTML = []byte(`<!doctype html>
     }
 
     $("applyAlgorithm").addEventListener("click", async () => {
-      await api("/api/algorithm", {
+      ensureSelectedPair();
+      await api("/api/implementation", {
         method: "POST",
-        body: JSON.stringify({ scenario: $("scenario").value, language: $("language").value, name: $("algorithm").value })
+        body: JSON.stringify({
+          scenario: $("scenario").value,
+          language: $("language").value,
+          algorithm: $("algorithm").value,
+          dataStructure: $("dataStructure").value
+        })
       });
       await loadState();
     });
@@ -1077,9 +1286,15 @@ var indexHTML = []byte(`<!doctype html>
     $("scenario").addEventListener("change", () => {
       state.selectedScenario = $("scenario").value;
       const scenario = currentScenario();
-      state.selectedAlgorithm = scenario.defaultAlgorithm || (scenario.algorithms && scenario.algorithms[0] && scenario.algorithms[0].name) || "";
+      const implementations = scenarioImplementations();
+      const defaultImplementation = implementations.find((implementation) => {
+        return implementation.algorithm === scenario.defaultAlgorithm && implementation.dataStructure === scenario.defaultDataStructure;
+      }) || implementations[0] || {};
+      state.selectedAlgorithm = defaultImplementation.algorithm || scenario.defaultAlgorithm || "";
+      state.selectedDataStructure = defaultImplementation.dataStructure || scenario.defaultDataStructure || "default";
       renderScenarioRequestControls(true);
       renderAlgorithmControls();
+      renderFocusControls();
     });
 
     $("language").addEventListener("change", () => {
@@ -1089,8 +1304,23 @@ var indexHTML = []byte(`<!doctype html>
 
     $("algorithm").addEventListener("change", () => {
       state.selectedAlgorithm = $("algorithm").value;
-      updateAlgorithmCards();
+      ensureSelectedPair("algorithm");
+      renderAlgorithmControls();
     });
+
+    $("dataStructure").addEventListener("change", () => {
+      state.selectedDataStructure = $("dataStructure").value;
+      ensureSelectedPair("dataStructure");
+      renderAlgorithmControls();
+    });
+
+    for (const button of document.querySelectorAll("[data-focus]")) {
+      button.addEventListener("click", () => {
+        state.focusMode = button.dataset.focus;
+        renderFocusControls();
+        renderAlgorithmControls();
+      });
+    }
 
     $("durationToggle").addEventListener("click", () => {
       setTimedRunOpen(!$("durationOption").classList.contains("open"));

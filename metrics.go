@@ -28,9 +28,13 @@ type AlgorithmMetrics struct {
 }
 
 type MetricEvent struct {
-	At        time.Time `json:"at"`
-	Algorithm string    `json:"algorithm"`
-	LatencyMS float64   `json:"latencyMs"`
+	At             time.Time `json:"at"`
+	Scenario       string    `json:"scenario"`
+	Language       string    `json:"language"`
+	Algorithm      string    `json:"algorithm"`
+	DataStructure  string    `json:"dataStructure"`
+	Implementation string    `json:"implementation"`
+	LatencyMS      float64   `json:"latencyMs"`
 }
 
 func NewMetrics() *Metrics {
@@ -43,14 +47,15 @@ func NewMetrics() *Metrics {
 	}
 }
 
-func (m *Metrics) Observe(algorithm string, duration time.Duration) {
+func (m *Metrics) Observe(scenario string, language string, algorithm string, dataStructure string, duration time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	metrics := m.byAlgo[algorithm]
+	implementation := implementationKey(scenario, language, algorithm, dataStructure)
+	metrics := m.byAlgo[implementation]
 	if metrics == nil {
 		metrics = &AlgorithmMetrics{RecentNS: make([]int64, 0, metricsWindow)}
-		m.byAlgo[algorithm] = metrics
+		m.byAlgo[implementation] = metrics
 	}
 
 	ns := duration.Nanoseconds()
@@ -64,9 +69,13 @@ func (m *Metrics) Observe(algorithm string, duration time.Duration) {
 	}
 
 	event := MetricEvent{
-		At:        time.Now().UTC(),
-		Algorithm: algorithm,
-		LatencyMS: float64(ns) / float64(time.Millisecond),
+		At:             time.Now().UTC(),
+		Scenario:       scenario,
+		Language:       language,
+		Algorithm:      algorithm,
+		DataStructure:  normalizedDataStructure(dataStructure),
+		Implementation: implementation,
+		LatencyMS:      float64(ns) / float64(time.Millisecond),
 	}
 	if len(m.events) < metricsWindow {
 		m.events = append(m.events, event)
@@ -86,6 +95,7 @@ type StatsSnapshot struct {
 	ActiveScenario       string                  `json:"activeScenario"`
 	ActiveLanguage       string                  `json:"activeLanguage"`
 	ActiveAlgorithm      string                  `json:"activeAlgorithm"`
+	ActiveDataStructure  string                  `json:"activeDataStructure"`
 	ActiveImplementation string                  `json:"activeImplementation"`
 	UptimeSeconds        int64                   `json:"uptimeSeconds"`
 	SinceSwitchSec       int64                   `json:"sinceSwitchSeconds"`
@@ -96,13 +106,18 @@ type StatsSnapshot struct {
 }
 
 type AlgoSnapshot struct {
-	Requests    uint64  `json:"requests"`
-	AverageMS   float64 `json:"averageMs"`
-	P50MS       float64 `json:"p50Ms"`
-	P95MS       float64 `json:"p95Ms"`
-	P99MS       float64 `json:"p99Ms"`
-	RecentCount int     `json:"recentCount"`
-	RecentRPS   float64 `json:"recentRps"`
+	Scenario       string  `json:"scenario"`
+	Language       string  `json:"language"`
+	Algorithm      string  `json:"algorithm"`
+	DataStructure  string  `json:"dataStructure"`
+	Implementation string  `json:"implementation"`
+	Requests       uint64  `json:"requests"`
+	AverageMS      float64 `json:"averageMs"`
+	P50MS          float64 `json:"p50Ms"`
+	P95MS          float64 `json:"p95Ms"`
+	P99MS          float64 `json:"p99Ms"`
+	RecentCount    int     `json:"recentCount"`
+	RecentRPS      float64 `json:"recentRps"`
 }
 
 func (m *Metrics) Snapshot() StatsSnapshot {
@@ -113,7 +128,7 @@ func (m *Metrics) Snapshot() StatsSnapshot {
 	recentRPS := m.recentRPSByAlgorithmLocked(now, 5*time.Second)
 	algorithms := make(map[string]AlgoSnapshot, len(m.byAlgo))
 	for name, metrics := range m.byAlgo {
-		algorithms[name] = snapshotAlgorithm(metrics, recentRPS[name])
+		algorithms[name] = snapshotAlgorithm(name, metrics, recentRPS[name])
 	}
 
 	events := append([]MetricEvent(nil), m.events...)
@@ -130,7 +145,7 @@ func (m *Metrics) recentRPSByAlgorithmLocked(now time.Time, window time.Duration
 	cutoff := now.Add(-window)
 	for _, event := range m.events {
 		if event.At.After(cutoff) || event.At.Equal(cutoff) {
-			counts[event.Algorithm]++
+			counts[event.Implementation]++
 		}
 	}
 
@@ -145,7 +160,7 @@ func (m *Metrics) recentRPSByAlgorithmLocked(now time.Time, window time.Duration
 	return rates
 }
 
-func snapshotAlgorithm(metrics *AlgorithmMetrics, recentRPS float64) AlgoSnapshot {
+func snapshotAlgorithm(implementation string, metrics *AlgorithmMetrics, recentRPS float64) AlgoSnapshot {
 	recent := append([]int64(nil), metrics.RecentNS...)
 	sort.Slice(recent, func(i, j int) bool {
 		return recent[i] < recent[j]
@@ -156,14 +171,20 @@ func snapshotAlgorithm(metrics *AlgorithmMetrics, recentRPS float64) AlgoSnapsho
 		avg = float64(metrics.TotalNS) / float64(metrics.Count) / float64(time.Millisecond)
 	}
 
+	scenario, language, algorithm, dataStructure := implementationParts(implementation)
 	return AlgoSnapshot{
-		Requests:    metrics.Count,
-		AverageMS:   avg,
-		P50MS:       percentileNS(recent, 0.50),
-		P95MS:       percentileNS(recent, 0.95),
-		P99MS:       percentileNS(recent, 0.99),
-		RecentCount: len(recent),
-		RecentRPS:   recentRPS,
+		Scenario:       scenario,
+		Language:       language,
+		Algorithm:      algorithm,
+		DataStructure:  dataStructure,
+		Implementation: implementation,
+		Requests:       metrics.Count,
+		AverageMS:      avg,
+		P50MS:          percentileNS(recent, 0.50),
+		P95MS:          percentileNS(recent, 0.95),
+		P99MS:          percentileNS(recent, 0.99),
+		RecentCount:    len(recent),
+		RecentRPS:      recentRPS,
 	}
 }
 
@@ -194,14 +215,16 @@ func (m *Metrics) PrometheusText(activeAlgorithm string, runtimeStats RuntimeSta
 	sort.Strings(names)
 	for _, name := range names {
 		metrics := m.byAlgo[name]
-		label := prometheusLabel(name)
-		fmt.Fprintf(&b, "lab_requests_total{algorithm=%q} %d\n", label, metrics.Count)
-		fmt.Fprintf(&b, "lab_request_duration_seconds_sum{algorithm=%q} %.9f\n", label, float64(metrics.TotalNS)/float64(time.Second))
-		fmt.Fprintf(&b, "lab_request_duration_seconds_count{algorithm=%q} %d\n", label, metrics.Count)
+		scenario, language, algorithm, dataStructure := implementationParts(name)
+		labels := prometheusImplementationLabels(scenario, language, algorithm, dataStructure, name)
+		fmt.Fprintf(&b, "lab_requests_total{%s} %d\n", labels, metrics.Count)
+		fmt.Fprintf(&b, "lab_request_duration_seconds_sum{%s} %.9f\n", labels, float64(metrics.TotalNS)/float64(time.Second))
+		fmt.Fprintf(&b, "lab_request_duration_seconds_count{%s} %d\n", labels, metrics.Count)
 	}
 	m.mu.RUnlock()
 
-	fmt.Fprintf(&b, "lab_active_algorithm_info{algorithm=%q} 1\n", prometheusLabel(activeAlgorithm))
+	scenario, language, algorithm, dataStructure := implementationParts(activeAlgorithm)
+	fmt.Fprintf(&b, "lab_active_algorithm_info{%s} 1\n", prometheusImplementationLabels(scenario, language, algorithm, dataStructure, activeAlgorithm))
 	fmt.Fprintf(&b, "lab_load_running %d\n", boolFloat(load.Running))
 	fmt.Fprintf(&b, "lab_load_in_flight %d\n", load.InFlight)
 	fmt.Fprintf(&b, "lab_runtime_goroutines %d\n", runtime.NumGoroutine())
@@ -211,6 +234,28 @@ func (m *Metrics) PrometheusText(activeAlgorithm string, runtimeStats RuntimeSta
 	}
 
 	return b.String()
+}
+
+func implementationParts(implementation string) (string, string, string, string) {
+	parts := strings.Split(implementation, ":")
+	if len(parts) >= 4 {
+		return parts[0], parts[1], parts[2], parts[3]
+	}
+	if len(parts) == 3 {
+		return parts[0], parts[1], parts[2], defaultDataStructure
+	}
+	return "", "", implementation, defaultDataStructure
+}
+
+func prometheusImplementationLabels(scenario string, language string, algorithm string, dataStructure string, implementation string) string {
+	return fmt.Sprintf(
+		"scenario=%q,language=%q,algorithm=%q,data_structure=%q,implementation=%q",
+		prometheusLabel(scenario),
+		prometheusLabel(language),
+		prometheusLabel(algorithm),
+		prometheusLabel(dataStructure),
+		prometheusLabel(implementation),
+	)
 }
 
 func boolFloat(value bool) int {

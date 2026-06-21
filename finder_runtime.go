@@ -39,24 +39,37 @@ type FinderRuntime interface {
 	Label() string
 	Available() bool
 	Error() string
-	Run(scenario string, algorithm string, request ScenarioRequest) (LookupResult, error)
+	Run(scenario string, algorithm string, dataStructure string, request ScenarioRequest) (LookupResult, error)
 	Find(algorithm string, since time.Time, includeIDs bool) (LookupResult, error)
 	Close() error
 }
 
 type GoRuntime struct {
-	scenarios map[string]map[string]ScenarioAlgorithm
+	scenarios map[string]map[string]ScenarioImplementation
 }
 
 func NewGoRuntime(algorithms any) *GoRuntime {
-	runtime := &GoRuntime{scenarios: make(map[string]map[string]ScenarioAlgorithm)}
+	runtime := &GoRuntime{scenarios: make(map[string]map[string]ScenarioImplementation)}
 	switch typed := algorithms.(type) {
-	case map[string]map[string]ScenarioAlgorithm:
+	case map[string]map[string]ScenarioImplementation:
 		runtime.scenarios = typed
+	case map[string]map[string]ScenarioAlgorithm:
+		for scenario, scenarioAlgorithms := range typed {
+			runtime.scenarios[scenario] = make(map[string]ScenarioImplementation, len(scenarioAlgorithms))
+			for name, algorithm := range scenarioAlgorithms {
+				runtime.scenarios[scenario][implementationName(name, defaultDataStructure)] = algorithmImplementation{
+					ScenarioAlgorithm: algorithm,
+					dataStructure:     defaultDataStructure,
+				}
+			}
+		}
 	case map[string]ProfileFinder:
-		runtime.scenarios[scenarioLookup] = make(map[string]ScenarioAlgorithm, len(typed))
+		runtime.scenarios[scenarioLookup] = make(map[string]ScenarioImplementation, len(typed))
 		for name, finder := range typed {
-			runtime.scenarios[scenarioLookup][name] = lookupAlgorithm{finder}
+			runtime.scenarios[scenarioLookup][implementationName(name, defaultDataStructure)] = algorithmImplementation{
+				ScenarioAlgorithm: lookupAlgorithm{finder},
+				dataStructure:     defaultDataStructure,
+			}
 		}
 	}
 	return runtime
@@ -78,14 +91,14 @@ func (r *GoRuntime) Error() string {
 	return ""
 }
 
-func (r *GoRuntime) Run(scenario string, algorithm string, request ScenarioRequest) (LookupResult, error) {
-	algorithms := r.scenarios[scenario]
-	if algorithms == nil {
+func (r *GoRuntime) Run(scenario string, algorithm string, dataStructure string, request ScenarioRequest) (LookupResult, error) {
+	implementations := r.scenarios[scenario]
+	if implementations == nil {
 		return LookupResult{}, fmt.Errorf("unknown scenario %q", scenario)
 	}
-	runner := algorithms[algorithm]
+	runner := implementations[implementationName(algorithm, dataStructure)]
 	if runner == nil {
-		return LookupResult{}, fmt.Errorf("unknown algorithm %q", algorithm)
+		return LookupResult{}, fmt.Errorf("unknown implementation %q/%q", algorithm, dataStructure)
 	}
 
 	start := time.Now()
@@ -103,7 +116,7 @@ func (r *GoRuntime) Run(scenario string, algorithm string, request ScenarioReque
 }
 
 func (r *GoRuntime) Find(algorithm string, since time.Time, includeIDs bool) (LookupResult, error) {
-	return r.Run(scenarioLookup, algorithm, ScenarioRequest{Since: since, IncludeIDs: includeIDs})
+	return r.Run(scenarioLookup, algorithm, defaultDataStructure, ScenarioRequest{Since: since, IncludeIDs: includeIDs})
 }
 
 func (r *GoRuntime) Close() error {
@@ -300,7 +313,7 @@ func (r *WorkerRuntime) nextRequestID() int64 {
 	return r.nextID
 }
 
-func (r *WorkerRuntime) Run(scenario string, algorithm string, request ScenarioRequest) (LookupResult, error) {
+func (r *WorkerRuntime) Run(scenario string, algorithm string, dataStructure string, request ScenarioRequest) (LookupResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -321,6 +334,7 @@ func (r *WorkerRuntime) Run(scenario string, algorithm string, request ScenarioR
 		Type:          "run",
 		Scenario:      scenario,
 		Algorithm:     algorithm,
+		DataStructure: dataStructure,
 		SinceUnixNano: request.SinceUnixNano,
 		IncludeIDs:    request.IncludeIDs,
 		Limit:         request.Limit,
@@ -349,7 +363,7 @@ func (r *WorkerRuntime) Run(scenario string, algorithm string, request ScenarioR
 }
 
 func (r *WorkerRuntime) Find(algorithm string, since time.Time, includeIDs bool) (LookupResult, error) {
-	return r.Run(scenarioLookup, algorithm, ScenarioRequest{Since: since, IncludeIDs: includeIDs})
+	return r.Run(scenarioLookup, algorithm, defaultDataStructure, ScenarioRequest{Since: since, IncludeIDs: includeIDs})
 }
 
 func (r *WorkerRuntime) writeRequest(request workerRequest) error {
@@ -424,6 +438,7 @@ type workerRequest struct {
 	ProfileCount        int    `json:"profileCount,omitempty"`
 	GeneratedAtUnixNano string `json:"generatedAtUnixNano,omitempty"`
 	Algorithm           string `json:"algorithm,omitempty"`
+	DataStructure       string `json:"dataStructure,omitempty"`
 	Scenario            string `json:"scenario,omitempty"`
 	SinceUnixNano       string `json:"sinceUnixNano,omitempty"`
 	IncludeIDs          bool   `json:"includeIds"`

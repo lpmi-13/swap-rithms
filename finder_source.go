@@ -15,6 +15,9 @@ var finderSource string
 //go:embed scenario_algorithms.go
 var scenarioAlgorithmSource string
 
+//go:embed membership_algorithms.go
+var membershipAlgorithmSource string
+
 //go:embed workers/finders.py
 var pythonFinderSource string
 
@@ -22,27 +25,35 @@ var pythonFinderSource string
 var typescriptFinderSource string
 
 var (
-	finderCodeOnce sync.Once
-	finderCodeMap  map[string]map[string]string
+	implementationCodeOnce sync.Once
+	implementationCodeMap  map[string]map[string]string
 )
 
-func finderCodeFor(name string, language string) string {
-	finderCodeOnce.Do(loadFinderCode)
-	return finderCodeMap[name][language]
+func implementationCodeFor(name string, language string) string {
+	implementationCodeOnce.Do(loadImplementationCode)
+	return implementationCodeMap[name][language]
 }
 
-func finderCodesFor(name string) map[string]string {
-	finderCodeOnce.Do(loadFinderCode)
+func implementationCodesFor(name string) map[string]string {
+	implementationCodeOnce.Do(loadImplementationCode)
 
-	codes := make(map[string]string, len(finderCodeMap[name]))
-	for language, code := range finderCodeMap[name] {
+	codes := make(map[string]string, len(implementationCodeMap[name]))
+	for language, code := range implementationCodeMap[name] {
 		codes[language] = code
 	}
 	return codes
 }
 
-func loadFinderCode() {
-	finderCodeMap = make(map[string]map[string]string)
+func finderCodeFor(name string, language string) string {
+	return implementationCodeFor(name, language)
+}
+
+func finderCodesFor(name string) map[string]string {
+	return implementationCodesFor(name)
+}
+
+func loadImplementationCode() {
+	implementationCodeMap = make(map[string]map[string]string)
 	specsByName := map[string]sourceSpec{
 		"slice_scan":     {receiver: "*SliceScanFinder", method: "Find", source: finderSource, filename: "finder.go"},
 		"binary_search":  {receiver: "*BinarySearchFinder", method: "Find", source: finderSource, filename: "finder.go"},
@@ -77,14 +88,19 @@ func loadFinderCode() {
 		"text_boyer_moore":    {receiver: "*TextBoyerMooreAlgorithm", method: "Run", source: scenarioAlgorithmSource, filename: "scenario_algorithms.go"},
 		"text_trie_prefix":    {receiver: "*TextTriePrefixAlgorithm", method: "Run", source: scenarioAlgorithmSource, filename: "scenario_algorithms.go"},
 		"text_inverted_index": {receiver: "*TextInvertedIndexAlgorithm", method: "Run", source: scenarioAlgorithmSource, filename: "scenario_algorithms.go"},
+
+		"scan_contains_slice":                 {receiver: "*ScanContainsSliceImplementation", method: "Run", source: membershipAlgorithmSource, filename: "membership_algorithms.go"},
+		"scan_contains_sorted_slice":          {receiver: "*ScanContainsSortedSliceImplementation", method: "Run", source: membershipAlgorithmSource, filename: "membership_algorithms.go"},
+		"binary_search_contains_sorted_slice": {receiver: "*BinarySearchContainsSortedSliceImplementation", method: "Run", source: membershipAlgorithmSource, filename: "membership_algorithms.go"},
+		"direct_lookup_hash_set":              {receiver: "*DirectLookupHashSetImplementation", method: "Run", source: membershipAlgorithmSource, filename: "membership_algorithms.go"},
 	}
 
 	for name, spec := range specsByName {
 		if code := findMethodSource(spec); code != "" {
-			setFinderCode(name, "go", code)
+			setImplementationCode(name, "go", code)
 		}
-		setFinderCode(name, "python", findMarkedSnippet(pythonFinderSource, name))
-		setFinderCode(name, "typescript", findMarkedSnippet(typescriptFinderSource, name))
+		setImplementationCode(name, "python", findMarkedSnippet(pythonFinderSource, name))
+		setImplementationCode(name, "typescript", findMarkedSnippet(typescriptFinderSource, name))
 	}
 }
 
@@ -95,15 +111,15 @@ type sourceSpec struct {
 	filename string
 }
 
-func setFinderCode(name string, language string, code string) {
+func setImplementationCode(name string, language string, code string) {
 	code = strings.TrimSpace(code)
 	if code == "" {
 		return
 	}
-	if finderCodeMap[name] == nil {
-		finderCodeMap[name] = make(map[string]string)
+	if implementationCodeMap[name] == nil {
+		implementationCodeMap[name] = make(map[string]string)
 	}
-	finderCodeMap[name][language] = code
+	implementationCodeMap[name][language] = code
 }
 
 func findMethodSource(spec sourceSpec) string {

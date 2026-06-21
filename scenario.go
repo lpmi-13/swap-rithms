@@ -10,6 +10,7 @@ import (
 
 const (
 	scenarioLookup     = "lookup"
+	scenarioMembership = "membership"
 	scenarioTopK       = "top_k"
 	scenarioSorting    = "sorting"
 	scenarioCaching    = "caching"
@@ -18,11 +19,14 @@ const (
 
 const (
 	defaultLookupAlgorithm     = "slice_scan"
+	defaultMembershipAlgorithm = "scan_contains"
 	defaultTopKAlgorithm       = "top_k_min_heap"
 	defaultSortingAlgorithm    = "sort_builtin"
 	defaultCachingAlgorithm    = "cache_lru"
 	defaultTextSearchAlgorithm = "text_lowercase"
 )
+
+const defaultDataStructure = "default"
 
 type ScenarioRequest struct {
 	Since         time.Time
@@ -51,36 +55,64 @@ type ScenarioAlgorithm interface {
 	Run(ScenarioRequest) []int
 }
 
+type AxisOption struct {
+	Name        string `json:"name"`
+	Label       string `json:"label"`
+	Description string `json:"description"`
+}
+
+type ScenarioAxes struct {
+	Algorithms     []AxisOption `json:"algorithms"`
+	DataStructures []AxisOption `json:"dataStructures"`
+}
+
+type ScenarioImplementation interface {
+	Name() string
+	Algorithm() string
+	DataStructure() string
+	Label() string
+	Complexity() string
+	Description() string
+	Run(ScenarioRequest) []int
+}
+
 type ScenarioDefinition struct {
-	Name             string
-	Label            string
-	Description      string
-	BusinessCase     string
-	Endpoint         string
-	RequestLabel     string
-	RequestUnit      string
-	RequestHelp      string
-	RequestMin       int
-	RequestMax       int
-	RequestDefault   int
-	QueryLabel       string
-	QueryDefault     string
-	QueryHelp        string
-	DefaultAlgorithm string
-	Algorithms       map[string]ScenarioAlgorithm
-	Order            []string
-	Verify           func(got []int, want []int) bool
+	Name                 string
+	Label                string
+	Description          string
+	BusinessCase         string
+	Endpoint             string
+	RequestLabel         string
+	RequestUnit          string
+	RequestHelp          string
+	RequestMin           int
+	RequestMax           int
+	RequestDefault       int
+	QueryLabel           string
+	QueryDefault         string
+	QueryHelp            string
+	DefaultAlgorithm     string
+	DefaultDataStructure string
+	Axes                 ScenarioAxes
+	Implementations      map[string]ScenarioImplementation
+	ImplementationOrder  []string
+	Algorithms           map[string]ScenarioAlgorithm
+	Order                []string
+	Verify               func(got []int, want []int) bool
 }
 
 type ScenarioInfo struct {
-	Name             string       `json:"name"`
-	Label            string       `json:"label"`
-	Description      string       `json:"description"`
-	BusinessCase     string       `json:"businessCase"`
-	Endpoint         string       `json:"endpoint"`
-	Request          RequestInfo  `json:"request"`
-	DefaultAlgorithm string       `json:"defaultAlgorithm"`
-	Algorithms       []FinderInfo `json:"algorithms"`
+	Name                 string               `json:"name"`
+	Label                string               `json:"label"`
+	Description          string               `json:"description"`
+	BusinessCase         string               `json:"businessCase"`
+	Endpoint             string               `json:"endpoint"`
+	Request              RequestInfo          `json:"request"`
+	DefaultAlgorithm     string               `json:"defaultAlgorithm"`
+	DefaultDataStructure string               `json:"defaultDataStructure"`
+	Axes                 ScenarioAxes         `json:"axes"`
+	Implementations      []ImplementationInfo `json:"implementations"`
+	Algorithms           []ImplementationInfo `json:"algorithms"`
 }
 
 type RequestInfo struct {
@@ -145,6 +177,13 @@ func NewScenarioRegistry(dataset *Dataset) (map[string]*ScenarioDefinition, []st
 		NewTextInvertedIndexAlgorithm(textCorpus),
 	}
 
+	membershipImplementations := []ScenarioImplementation{
+		NewScanContainsSliceImplementation(dataset.Profiles),
+		NewScanContainsSortedSliceImplementation(dataset.Profiles),
+		NewBinarySearchContainsSortedSliceImplementation(dataset.Profiles),
+		NewDirectLookupHashSetImplementation(dataset.Profiles),
+	}
+
 	scenarios := map[string]*ScenarioDefinition{
 		scenarioLookup: {
 			Name:             scenarioLookup,
@@ -162,6 +201,36 @@ func NewScenarioRegistry(dataset *Dataset) (map[string]*ScenarioDefinition, []st
 			Algorithms:       algorithmMap(lookupAlgorithms),
 			Order:            algorithmOrder(lookupAlgorithms),
 			Verify:           sameIDsIgnoreOrder,
+		},
+		scenarioMembership: {
+			Name:                 scenarioMembership,
+			Label:                "Membership checks",
+			Description:          "Check which requested profile IDs exist in the active profile set.",
+			BusinessCase:         "Example: validate imported account IDs, audience lists, or permission targets before running a bulk operation.",
+			Endpoint:             "/profiles/membership",
+			RequestLabel:         "Candidate ID checks",
+			RequestUnit:          "IDs",
+			RequestHelp:          "Allowed range: 1 to 10,000 requested IDs.",
+			RequestMin:           1,
+			RequestMax:           10000,
+			RequestDefault:       100,
+			DefaultAlgorithm:     defaultMembershipAlgorithm,
+			DefaultDataStructure: "slice",
+			Axes: ScenarioAxes{
+				Algorithms: []AxisOption{
+					{Name: "scan_contains", Label: "Scan contains", Description: "Compare each requested ID to stored IDs until a match is found."},
+					{Name: "binary_search_contains", Label: "Binary search contains", Description: "Use ordering to discard half of the ID set on each step."},
+					{Name: "direct_lookup", Label: "Direct lookup", Description: "Use a keyed set to test membership directly."},
+				},
+				DataStructures: []AxisOption{
+					{Name: "slice", Label: "Slice", Description: "IDs stored in insertion order."},
+					{Name: "sorted_slice", Label: "Sorted slice", Description: "IDs stored in ascending order."},
+					{Name: "hash_set", Label: "Hash set", Description: "IDs stored as hash keys."},
+				},
+			},
+			Implementations:     implementationMap(membershipImplementations),
+			ImplementationOrder: implementationOrder(membershipImplementations),
+			Verify:              sameIDsSameOrder,
 		},
 		scenarioTopK: {
 			Name:             scenarioTopK,
@@ -236,7 +305,8 @@ func NewScenarioRegistry(dataset *Dataset) (map[string]*ScenarioDefinition, []st
 		},
 	}
 
-	return scenarios, []string{scenarioLookup, scenarioTopK, scenarioSorting, scenarioCaching, scenarioTextSearch}
+	ensureScenarioDefinitions(scenarios)
+	return scenarios, []string{scenarioLookup, scenarioMembership, scenarioTopK, scenarioSorting, scenarioCaching, scenarioTextSearch}
 }
 
 func algorithmMap(algorithms []ScenarioAlgorithm) map[string]ScenarioAlgorithm {
@@ -255,7 +325,87 @@ func algorithmOrder(algorithms []ScenarioAlgorithm) []string {
 	return order
 }
 
+func implementationMap(implementations []ScenarioImplementation) map[string]ScenarioImplementation {
+	result := make(map[string]ScenarioImplementation, len(implementations))
+	for _, implementation := range implementations {
+		result[implementationName(implementation.Algorithm(), implementation.DataStructure())] = implementation
+	}
+	return result
+}
+
+func implementationOrder(implementations []ScenarioImplementation) []string {
+	order := make([]string, 0, len(implementations))
+	for _, implementation := range implementations {
+		order = append(order, implementationName(implementation.Algorithm(), implementation.DataStructure()))
+	}
+	return order
+}
+
+func ensureScenarioDefinitions(scenarios map[string]*ScenarioDefinition) {
+	for _, def := range scenarios {
+		ensureScenarioDefinition(def)
+	}
+}
+
+func ensureScenarioDefinition(def *ScenarioDefinition) {
+	if def.DefaultDataStructure == "" {
+		def.DefaultDataStructure = defaultDataStructure
+	}
+	if def.Implementations == nil {
+		def.Implementations = make(map[string]ScenarioImplementation, len(def.Algorithms))
+		for _, name := range def.Order {
+			algorithm := def.Algorithms[name]
+			if algorithm == nil {
+				continue
+			}
+			implementation := algorithmImplementation{
+				ScenarioAlgorithm: algorithm,
+				dataStructure:     def.DefaultDataStructure,
+			}
+			key := implementationName(implementation.Algorithm(), implementation.DataStructure())
+			def.Implementations[key] = implementation
+			def.ImplementationOrder = append(def.ImplementationOrder, key)
+		}
+	}
+	if len(def.Axes.Algorithms) == 0 {
+		def.Axes.Algorithms = algorithmAxisOptions(def)
+	}
+	if len(def.Axes.DataStructures) == 0 {
+		def.Axes.DataStructures = []AxisOption{{
+			Name:        def.DefaultDataStructure,
+			Label:       dataStructureLabel(def.DefaultDataStructure),
+			Description: "Default backing structure for this scenario.",
+		}}
+	}
+}
+
+func algorithmAxisOptions(def *ScenarioDefinition) []AxisOption {
+	seen := make(map[string]bool)
+	options := make([]AxisOption, 0, len(def.ImplementationOrder))
+	for _, key := range def.ImplementationOrder {
+		implementation := def.Implementations[key]
+		if implementation == nil || seen[implementation.Algorithm()] {
+			continue
+		}
+		seen[implementation.Algorithm()] = true
+		options = append(options, AxisOption{
+			Name:        implementation.Algorithm(),
+			Label:       implementation.Label(),
+			Description: implementation.Description(),
+		})
+	}
+	return options
+}
+
+func dataStructureLabel(name string) string {
+	if name == defaultDataStructure {
+		return "Default backing structure"
+	}
+	return strings.ReplaceAll(name, "_", " ")
+}
+
 func scenarioInfo(def *ScenarioDefinition) ScenarioInfo {
+	implementations := implementationInfosFor(def)
 	return ScenarioInfo{
 		Name:         def.Name,
 		Label:        def.Label,
@@ -273,28 +423,60 @@ func scenarioInfo(def *ScenarioDefinition) ScenarioInfo {
 			QueryDefault: def.QueryDefault,
 			QueryHelp:    def.QueryHelp,
 		},
-		DefaultAlgorithm: def.DefaultAlgorithm,
-		Algorithms:       algorithmInfosFor(def),
+		DefaultAlgorithm:     def.DefaultAlgorithm,
+		DefaultDataStructure: def.DefaultDataStructure,
+		Axes:                 def.Axes,
+		Implementations:      implementations,
+		Algorithms:           implementations,
 	}
 }
 
-func algorithmInfosFor(def *ScenarioDefinition) []FinderInfo {
-	infos := make([]FinderInfo, 0, len(def.Order))
-	for _, name := range def.Order {
-		infos = append(infos, algorithmInfo(def.Algorithms[name]))
+func implementationInfosFor(def *ScenarioDefinition) []ImplementationInfo {
+	infos := make([]ImplementationInfo, 0, len(def.ImplementationOrder))
+	for _, name := range def.ImplementationOrder {
+		infos = append(infos, implementationInfo(def.Implementations[name]))
 	}
 	return infos
 }
 
-func algorithmInfo(algorithm ScenarioAlgorithm) FinderInfo {
-	return FinderInfo{
-		Name:           algorithm.Name(),
-		Label:          algorithm.Label(),
-		Complexity:     algorithm.Complexity(),
-		Description:    algorithm.Description(),
-		Code:           finderCodeFor(algorithm.Name(), languageGo),
-		CodeByLanguage: finderCodesFor(algorithm.Name()),
+func algorithmInfosFor(def *ScenarioDefinition) []ImplementationInfo {
+	return implementationInfosFor(def)
+}
+
+func implementationInfo(implementation ScenarioImplementation) ImplementationInfo {
+	return ImplementationInfo{
+		Name:           implementation.Name(),
+		Algorithm:      implementation.Algorithm(),
+		DataStructure:  implementation.DataStructure(),
+		Label:          implementation.Label(),
+		Complexity:     implementation.Complexity(),
+		Description:    implementation.Description(),
+		Code:           implementationCodeFor(implementation.Name(), languageGo),
+		CodeByLanguage: implementationCodesFor(implementation.Name()),
 	}
+}
+
+func algorithmInfo(algorithm ScenarioAlgorithm) ImplementationInfo {
+	return implementationInfo(algorithmImplementation{
+		ScenarioAlgorithm: algorithm,
+		dataStructure:     defaultDataStructure,
+	})
+}
+
+type algorithmImplementation struct {
+	ScenarioAlgorithm
+	dataStructure string
+}
+
+func (a algorithmImplementation) Algorithm() string {
+	return a.ScenarioAlgorithm.Name()
+}
+
+func (a algorithmImplementation) DataStructure() string {
+	if a.dataStructure == "" {
+		return defaultDataStructure
+	}
+	return a.dataStructure
 }
 
 type lookupAlgorithm struct {

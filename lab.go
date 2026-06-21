@@ -20,10 +20,11 @@ type Lab struct {
 	runtimes      map[string]FinderRuntime
 	languages     []string
 
-	mu              sync.RWMutex
-	activeScenario  string
-	activeLanguage  string
-	activeAlgorithm string
+	mu                  sync.RWMutex
+	activeScenario      string
+	activeLanguage      string
+	activeAlgorithm     string
+	activeDataStructure string
 
 	metrics *Metrics
 	loadGen *LoadGenerator
@@ -31,24 +32,25 @@ type Lab struct {
 
 func NewLab(dataset *Dataset, selfURL string) *Lab {
 	scenarios, scenarioOrder := NewScenarioRegistry(dataset)
-	goAlgorithms := make(map[string]map[string]ScenarioAlgorithm, len(scenarios))
+	goImplementations := make(map[string]map[string]ScenarioImplementation, len(scenarios))
 	for name, scenario := range scenarios {
-		goAlgorithms[name] = scenario.Algorithms
+		goImplementations[name] = scenario.Implementations
 	}
 
 	lab := &Lab{
-		dataset:         dataset,
-		selfURL:         selfURL,
-		scenarios:       scenarios,
-		scenarioOrder:   scenarioOrder,
-		runtimes:        make(map[string]FinderRuntime, 3),
-		languages:       []string{languageGo, languagePython, languageTypeScript},
-		activeScenario:  scenarioLookup,
-		activeLanguage:  languageGo,
-		activeAlgorithm: scenarios[scenarioLookup].DefaultAlgorithm,
-		metrics:         NewMetrics(),
+		dataset:             dataset,
+		selfURL:             selfURL,
+		scenarios:           scenarios,
+		scenarioOrder:       scenarioOrder,
+		runtimes:            make(map[string]FinderRuntime, 3),
+		languages:           []string{languageGo, languagePython, languageTypeScript},
+		activeScenario:      scenarioLookup,
+		activeLanguage:      languageGo,
+		activeAlgorithm:     scenarios[scenarioLookup].DefaultAlgorithm,
+		activeDataStructure: scenarios[scenarioLookup].DefaultDataStructure,
+		metrics:             NewMetrics(),
 	}
-	lab.runtimes[languageGo] = NewGoRuntime(goAlgorithms)
+	lab.runtimes[languageGo] = NewGoRuntime(goImplementations)
 	lab.runtimes[languagePython] = NewPythonRuntime(dataset)
 	lab.runtimes[languageTypeScript] = NewTypeScriptRuntime(dataset)
 	lab.loadGen = NewLoadGenerator(lab)
@@ -67,11 +69,13 @@ func (l *Lab) Close() {
 func (l *Lab) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/", l.handleIndex)
 	mux.HandleFunc("/profiles/recent", l.handleRecentProfiles)
+	mux.HandleFunc("/profiles/membership", l.handleMembershipProfiles)
 	mux.HandleFunc("/profiles/top", l.handleTopProfiles)
 	mux.HandleFunc("/profiles/sorted", l.handleSortedProfiles)
 	mux.HandleFunc("/profiles/search", l.handleSearchProfiles)
 	mux.HandleFunc("/profiles/cache", l.handleCachedProfile)
 	mux.HandleFunc("/api/state", l.handleState)
+	mux.HandleFunc("/api/implementation", l.handleImplementation)
 	mux.HandleFunc("/api/algorithm", l.handleAlgorithm)
 	mux.HandleFunc("/api/load/start", l.handleLoadStart)
 	mux.HandleFunc("/api/load/rate", l.handleLoadRate)
@@ -80,37 +84,41 @@ func (l *Lab) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/metrics", l.handlePrometheusMetrics)
 }
 
-func (l *Lab) activeRuntime() (string, string, string, FinderRuntime) {
+func (l *Lab) activeRuntime() (string, string, string, string, FinderRuntime) {
 	l.mu.RLock()
 	scenario := l.activeScenario
 	language := l.activeLanguage
 	algorithm := l.activeAlgorithm
+	dataStructure := l.activeDataStructure
 	runtime := l.runtimes[language]
 	l.mu.RUnlock()
-	return scenario, language, algorithm, runtime
+	return scenario, language, algorithm, dataStructure, runtime
 }
 
-func (l *Lab) runtimeForScenario(scenario string) (string, string, FinderRuntime, error) {
+func (l *Lab) runtimeForScenario(scenario string) (string, string, string, FinderRuntime, error) {
 	l.mu.RLock()
 	language := l.activeLanguage
 	algorithm := l.activeAlgorithm
+	dataStructure := l.activeDataStructure
 	if l.activeScenario != scenario {
 		if def := l.scenarios[scenario]; def != nil {
 			algorithm = def.DefaultAlgorithm
+			dataStructure = def.DefaultDataStructure
 		}
 	}
 	runtime := l.runtimes[language]
 	l.mu.RUnlock()
 	if runtime == nil {
-		return "", "", nil, fmt.Errorf("active runtime unavailable")
+		return "", "", "", nil, fmt.Errorf("active runtime unavailable")
 	}
-	return language, algorithm, runtime, nil
+	return language, algorithm, dataStructure, runtime, nil
 }
 
 func (l *Lab) setImplementation(values ...string) error {
 	scenario := ""
 	language := ""
 	algorithm := ""
+	dataStructure := ""
 	switch len(values) {
 	case 2:
 		language = values[0]
@@ -119,12 +127,18 @@ func (l *Lab) setImplementation(values ...string) error {
 		scenario = values[0]
 		language = values[1]
 		algorithm = values[2]
+	case 4:
+		scenario = values[0]
+		language = values[1]
+		algorithm = values[2]
+		dataStructure = values[3]
 	default:
-		return fmt.Errorf("setImplementation expects language/algorithm or scenario/language/algorithm")
+		return fmt.Errorf("setImplementation expects language/algorithm, scenario/language/algorithm, or scenario/language/algorithm/dataStructure")
 	}
 	scenario = strings.TrimSpace(scenario)
 	language = strings.TrimSpace(language)
 	algorithm = strings.TrimSpace(algorithm)
+	dataStructure = strings.TrimSpace(dataStructure)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -146,6 +160,9 @@ func (l *Lab) setImplementation(values ...string) error {
 			algorithm = def.DefaultAlgorithm
 		}
 	}
+	if dataStructure == "" {
+		dataStructure = def.DefaultDataStructure
+	}
 
 	runtime := l.runtimes[language]
 	if runtime == nil {
@@ -154,29 +171,30 @@ func (l *Lab) setImplementation(values ...string) error {
 	if !runtime.Available() {
 		return fmt.Errorf("%s runtime unavailable: %s", runtime.Label(), runtime.Error())
 	}
-	if _, ok := def.Algorithms[algorithm]; !ok {
-		return fmt.Errorf("unknown algorithm %q", algorithm)
+	if !validAxisSelection(def, algorithm, dataStructure) {
+		return fmt.Errorf("invalid implementation %q with data structure %q", algorithm, dataStructure)
 	}
 
 	l.activeScenario = scenario
 	l.activeLanguage = language
 	l.activeAlgorithm = algorithm
+	l.activeDataStructure = dataStructure
 	return nil
 }
 
-func (l *Lab) algorithmInfos() []FinderInfo {
+func (l *Lab) implementationInfos() []ImplementationInfo {
 	l.mu.RLock()
 	scenario := l.activeScenario
 	l.mu.RUnlock()
-	return l.algorithmInfosForScenario(scenario)
+	return l.implementationInfosForScenario(scenario)
 }
 
-func (l *Lab) algorithmInfosForScenario(scenario string) []FinderInfo {
+func (l *Lab) implementationInfosForScenario(scenario string) []ImplementationInfo {
 	def := l.scenarios[scenario]
 	if def == nil {
 		return nil
 	}
-	return algorithmInfosFor(def)
+	return implementationInfosFor(def)
 }
 
 func (l *Lab) scenarioInfos() []ScenarioInfo {
@@ -220,6 +238,15 @@ func (l *Lab) handleRecentProfiles(w http.ResponseWriter, r *http.Request) {
 	includeIDs := parseBoolDefault(r.URL.Query().Get("ids"), true)
 	request := ScenarioRequest{Since: since, IncludeIDs: includeIDs}
 	l.runScenario(w, scenarioLookup, request, map[string]any{"since": since})
+}
+
+func (l *Lab) handleMembershipProfiles(w http.ResponseWriter, r *http.Request) {
+	request, meta, err := l.parseLimitRequest(r, scenarioMembership, "limit")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	l.runScenario(w, scenarioMembership, request, meta)
 }
 
 func (l *Lab) handleTopProfiles(w http.ResponseWriter, r *http.Request) {
@@ -293,25 +320,26 @@ func (l *Lab) runScenario(w http.ResponseWriter, scenario string, request Scenar
 	if request.Limit > 0 {
 		request.Limit = clampScenarioLimit(request.Limit, def)
 	}
-	language, algorithm, runtime, err := l.runtimeForScenario(scenario)
+	language, algorithm, dataStructure, runtime, err := l.runtimeForScenario(scenario)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	result, err := runtime.Run(scenario, algorithm, request)
+	result, err := runtime.Run(scenario, algorithm, dataStructure, request)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	implementation := implementationKey(scenario, language, algorithm)
-	l.metrics.Observe(implementation, result.Elapsed)
+	implementation := implementationKey(scenario, language, algorithm, dataStructure)
+	l.metrics.Observe(scenario, language, algorithm, dataStructure, result.Elapsed)
 
 	response := ScenarioRunResponse{
 		Scenario:       scenario,
 		Language:       language,
 		Algorithm:      algorithm,
+		DataStructure:  dataStructure,
 		Implementation: implementation,
 		Count:          result.Count,
 		ElapsedMicros:  result.Elapsed.Microseconds(),
@@ -330,6 +358,7 @@ type ScenarioRunResponse struct {
 	Scenario       string         `json:"scenario"`
 	Language       string         `json:"language"`
 	Algorithm      string         `json:"algorithm"`
+	DataStructure  string         `json:"dataStructure"`
 	Implementation string         `json:"implementation"`
 	Since          time.Time      `json:"since,omitempty"`
 	Count          int            `json:"count"`
@@ -395,15 +424,18 @@ func (l *Lab) handleState(w http.ResponseWriter, r *http.Request) {
 }
 
 func (l *Lab) stateResponse() StateResponse {
-	scenario, language, algorithm, _ := l.activeRuntime()
+	scenario, language, algorithm, dataStructure, _ := l.activeRuntime()
+	implementations := l.implementationInfos()
 	return StateResponse{
 		ActiveScenario:       scenario,
 		ActiveLanguage:       language,
 		ActiveAlgorithm:      algorithm,
-		ActiveImplementation: implementationKey(scenario, language, algorithm),
+		ActiveDataStructure:  dataStructure,
+		ActiveImplementation: implementationKey(scenario, language, algorithm, dataStructure),
 		Scenarios:            l.scenarioInfos(),
 		Languages:            l.languageInfos(),
-		Algorithms:           l.algorithmInfos(),
+		Implementations:      implementations,
+		Algorithms:           implementations,
 		ProfileCount:         len(l.dataset.Profiles),
 		GeneratedAt:          l.dataset.GeneratedAt,
 		Load:                 l.loadGen.State(),
@@ -411,16 +443,43 @@ func (l *Lab) stateResponse() StateResponse {
 }
 
 type StateResponse struct {
-	ActiveScenario       string             `json:"activeScenario"`
-	ActiveLanguage       string             `json:"activeLanguage"`
-	ActiveAlgorithm      string             `json:"activeAlgorithm"`
-	ActiveImplementation string             `json:"activeImplementation"`
-	Scenarios            []ScenarioInfo     `json:"scenarios"`
-	Languages            []LanguageInfo     `json:"languages"`
-	Algorithms           []FinderInfo       `json:"algorithms"`
-	ProfileCount         int                `json:"profileCount"`
-	GeneratedAt          time.Time          `json:"generatedAt"`
-	Load                 LoadGeneratorState `json:"load"`
+	ActiveScenario       string               `json:"activeScenario"`
+	ActiveLanguage       string               `json:"activeLanguage"`
+	ActiveAlgorithm      string               `json:"activeAlgorithm"`
+	ActiveDataStructure  string               `json:"activeDataStructure"`
+	ActiveImplementation string               `json:"activeImplementation"`
+	Scenarios            []ScenarioInfo       `json:"scenarios"`
+	Languages            []LanguageInfo       `json:"languages"`
+	Implementations      []ImplementationInfo `json:"implementations"`
+	Algorithms           []ImplementationInfo `json:"algorithms"`
+	ProfileCount         int                  `json:"profileCount"`
+	GeneratedAt          time.Time            `json:"generatedAt"`
+	Load                 LoadGeneratorState   `json:"load"`
+}
+
+func (l *Lab) handleImplementation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		Scenario      string `json:"scenario"`
+		Language      string `json:"language"`
+		Algorithm     string `json:"algorithm"`
+		DataStructure string `json:"dataStructure"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if err := l.setImplementation(req.Scenario, req.Language, req.Algorithm, req.DataStructure); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	scenario, language, algorithm, dataStructure, _ := l.activeRuntime()
+	l.metrics.MarkAlgorithmSwitch(implementationKey(scenario, language, algorithm, dataStructure))
+	writeJSON(w, http.StatusOK, l.stateResponse())
 }
 
 func (l *Lab) handleAlgorithm(w http.ResponseWriter, r *http.Request) {
@@ -430,20 +489,26 @@ func (l *Lab) handleAlgorithm(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Scenario string `json:"scenario"`
-		Name     string `json:"name"`
-		Language string `json:"language"`
+		Scenario      string `json:"scenario"`
+		Name          string `json:"name"`
+		Language      string `json:"language"`
+		DataStructure string `json:"dataStructure"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	if err := l.setImplementation(req.Scenario, req.Language, req.Name); err != nil {
+	if req.DataStructure == "" {
+		if def := l.scenarios[strings.TrimSpace(req.Scenario)]; def != nil {
+			req.DataStructure = def.DefaultDataStructure
+		}
+	}
+	if err := l.setImplementation(req.Scenario, req.Language, req.Name, req.DataStructure); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	scenario, language, algorithm, _ := l.activeRuntime()
-	l.metrics.MarkAlgorithmSwitch(implementationKey(scenario, language, algorithm))
+	scenario, language, algorithm, dataStructure, _ := l.activeRuntime()
+	l.metrics.MarkAlgorithmSwitch(implementationKey(scenario, language, algorithm, dataStructure))
 	writeJSON(w, http.StatusOK, l.stateResponse())
 }
 
@@ -500,12 +565,13 @@ func (l *Lab) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scenario, language, algorithm, _ := l.activeRuntime()
-	implementation := implementationKey(scenario, language, algorithm)
+	scenario, language, algorithm, dataStructure, _ := l.activeRuntime()
+	implementation := implementationKey(scenario, language, algorithm, dataStructure)
 	stats := l.metrics.Snapshot()
 	stats.ActiveScenario = scenario
 	stats.ActiveLanguage = language
 	stats.ActiveAlgorithm = algorithm
+	stats.ActiveDataStructure = dataStructure
 	stats.ActiveImplementation = implementation
 	stats.Load = l.loadGen.State()
 	stats.Runtime = ReadRuntimeStats()
@@ -518,13 +584,42 @@ func (l *Lab) handlePrometheusMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scenario, language, algorithm, _ := l.activeRuntime()
+	scenario, language, algorithm, dataStructure, _ := l.activeRuntime()
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	_, _ = w.Write([]byte(l.metrics.PrometheusText(implementationKey(scenario, language, algorithm), ReadRuntimeStats(), l.loadGen.State())))
+	_, _ = w.Write([]byte(l.metrics.PrometheusText(implementationKey(scenario, language, algorithm, dataStructure), ReadRuntimeStats(), l.loadGen.State())))
 }
 
-func implementationKey(parts ...string) string {
-	return strings.Join(parts, ":")
+func implementationName(algorithm string, dataStructure string) string {
+	if dataStructure == "" {
+		dataStructure = defaultDataStructure
+	}
+	return algorithm + ":" + dataStructure
+}
+
+func implementationKey(scenario string, language string, algorithm string, dataStructure string) string {
+	return strings.Join([]string{scenario, language, algorithm, normalizedDataStructure(dataStructure)}, ":")
+}
+
+func normalizedDataStructure(dataStructure string) string {
+	if dataStructure == "" {
+		return defaultDataStructure
+	}
+	return dataStructure
+}
+
+func findImplementation(def *ScenarioDefinition, algorithm string, dataStructure string) ScenarioImplementation {
+	if def == nil {
+		return nil
+	}
+	if algorithm == "" {
+		algorithm = def.DefaultAlgorithm
+	}
+	dataStructure = normalizedDataStructure(dataStructure)
+	return def.Implementations[implementationName(algorithm, dataStructure)]
+}
+
+func validAxisSelection(def *ScenarioDefinition, algorithm string, dataStructure string) bool {
+	return findImplementation(def, algorithm, dataStructure) != nil
 }
 
 func sortedIDs(ids []int) []int {

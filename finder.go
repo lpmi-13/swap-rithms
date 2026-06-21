@@ -15,8 +15,10 @@ type ProfileFinder interface {
 	Find(since time.Time) []int
 }
 
-type FinderInfo struct {
+type ImplementationInfo struct {
 	Name           string            `json:"name"`
+	Algorithm      string            `json:"algorithm"`
+	DataStructure  string            `json:"dataStructure"`
 	Label          string            `json:"label"`
 	Complexity     string            `json:"complexity"`
 	Description    string            `json:"description"`
@@ -24,14 +26,18 @@ type FinderInfo struct {
 	CodeByLanguage map[string]string `json:"codeByLanguage"`
 }
 
-func finderInfo(f ProfileFinder) FinderInfo {
-	return FinderInfo{
+type FinderInfo = ImplementationInfo
+
+func finderInfo(f ProfileFinder) ImplementationInfo {
+	return ImplementationInfo{
 		Name:           f.Name(),
+		Algorithm:      f.Name(),
+		DataStructure:  defaultDataStructure,
 		Label:          f.Label(),
 		Complexity:     f.Complexity(),
 		Description:    f.Description(),
-		Code:           finderCodeFor(f.Name(), "go"),
-		CodeByLanguage: finderCodesFor(f.Name()),
+		Code:           implementationCodeFor(f.Name(), "go"),
+		CodeByLanguage: implementationCodesFor(f.Name()),
 	}
 }
 
