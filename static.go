@@ -89,6 +89,8 @@ var indexHTML = []byte(`<!doctype html>
       font: inherit;
     }
     input[type="number"] { width: 110px; }
+    input[type="text"] { width: 180px; }
+    [hidden] { display: none !important; }
     .field {
       position: relative;
     }
@@ -237,6 +239,26 @@ var indexHTML = []byte(`<!doctype html>
       display: grid;
       gap: 8px;
       margin-top: 12px;
+    }
+    .scenario-detail {
+      margin-top: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfdff;
+      padding: 10px 12px;
+      display: grid;
+      gap: 5px;
+    }
+    .scenario-detail strong {
+      font-size: 13px;
+    }
+    .scenario-business {
+      color: var(--text);
+      font-size: 13px;
+    }
+    .business-label {
+      color: var(--muted);
+      font-weight: 700;
     }
     .algorithm {
       border: 1px solid var(--line);
@@ -396,6 +418,10 @@ var indexHTML = []byte(`<!doctype html>
         <h2>Implementation</h2>
         <div class="row control-row">
           <label>
+            Scenario
+            <select id="scenario"></select>
+          </label>
+          <label>
             Language
             <select id="language"></select>
           </label>
@@ -405,6 +431,11 @@ var indexHTML = []byte(`<!doctype html>
           </label>
           <button id="applyAlgorithm">Apply</button>
           <span class="muted" id="profileCount"></span>
+        </div>
+        <div class="scenario-detail">
+          <strong id="scenarioTitle">Lookup and indexing</strong>
+          <span class="muted" id="scenarioDescription">Find profiles updated within a recent time window.</span>
+          <span class="scenario-business"><span class="business-label">Business case:</span> <span id="scenarioBusinessCase"></span></span>
         </div>
         <div class="algorithm-list" id="algorithmList"></div>
       </div>
@@ -419,9 +450,14 @@ var indexHTML = []byte(`<!doctype html>
               <span id="rateHint" class="field-hint">Allowed range: 1 to 10,000 requests/sec.</span>
             </label>
             <label id="windowField" class="field">
-              Recent window seconds
+              <span id="requestValueLabel">Recent window seconds</span>
               <input id="window" type="number" min="1" max="86400" value="300" aria-describedby="windowHint" aria-invalid="false">
               <span id="windowHint" class="field-hint">Allowed range: 1 to 86,400 seconds.</span>
+            </label>
+            <label id="queryField" class="field" hidden>
+              <span id="queryLabel">Search query</span>
+              <input id="query" type="text" value="platform" aria-describedby="queryHint" aria-invalid="false">
+              <span id="queryHint" class="field-hint">Searches normalized profile text.</span>
             </label>
             <div id="durationOption" class="duration-option">
               <button id="durationToggle" class="duration-toggle" type="button" aria-expanded="false" aria-controls="durationPanel">Run for set time</button>
@@ -444,7 +480,7 @@ var indexHTML = []byte(`<!doctype html>
             <button id="stopLoad" class="danger">Stop</button>
             <span class="status"><span id="loadDot" class="dot"></span><span id="loadStatus">idle</span></span>
           </div>
-          <footer>Recent window sets the <code>/profiles/recent?window=</code> lookup and the chart history horizon. The shown latency is measured from real algorithm executions.</footer>
+          <footer id="loadHint">Recent window sets the <code>/profiles/recent?window=</code> lookup and the chart history horizon. The shown latency is measured from real algorithm executions.</footer>
         </div>
       </div>
     </section>
@@ -470,11 +506,14 @@ var indexHTML = []byte(`<!doctype html>
 
   <script>
     const state = {
+      activeScenario: "lookup",
       activeLanguage: "go",
       activeAlgorithm: "slice_scan",
-      activeImplementation: "go:slice_scan",
+      activeImplementation: "lookup:go:slice_scan",
+      selectedScenario: "lookup",
       selectedLanguage: "go",
       selectedAlgorithm: "slice_scan",
+      scenarios: [],
       languages: [],
       algorithms: [],
       rpsHistory: [],
@@ -507,17 +546,59 @@ var indexHTML = []byte(`<!doctype html>
 
     async function loadState() {
       const data = await api("/api/state");
+      state.activeScenario = data.activeScenario;
       state.activeLanguage = data.activeLanguage;
       state.activeAlgorithm = data.activeAlgorithm;
       state.activeImplementation = data.activeImplementation;
+      state.scenarios = data.scenarios || [];
       state.languages = data.languages || [];
-      state.algorithms = data.algorithms;
+      state.algorithms = data.algorithms || [];
+      state.selectedScenario = data.activeScenario;
       state.selectedLanguage = data.activeLanguage;
       state.selectedAlgorithm = data.activeAlgorithm;
       $("profileCount").textContent = fmt.format(data.profileCount) + " profiles";
+      renderScenarioControls();
+      renderScenarioRequestControls(false);
       renderLanguageControls();
       renderAlgorithmControls();
       renderLoad(data.load);
+    }
+
+    function currentScenario() {
+      return state.scenarios.find((scenario) => scenario.name === state.selectedScenario) || state.scenarios[0] || {
+        name: "lookup",
+        label: "Lookup and indexing",
+        description: "Find profiles updated within a recent time window.",
+        businessCase: "Example: power an operations dashboard that asks which accounts changed in the last 5 minutes.",
+        endpoint: "/profiles/recent",
+        defaultAlgorithm: "slice_scan",
+        algorithms: state.algorithms,
+        request: { label: "Recent window seconds", unit: "seconds", min: 1, max: 86400, default: 300, help: "Allowed range: 1 to 86,400 seconds." }
+      };
+    }
+
+    function scenarioAlgorithms() {
+      const scenario = currentScenario();
+      return scenario.algorithms || state.algorithms || [];
+    }
+
+    function renderScenarioControls() {
+      const select = $("scenario");
+      select.innerHTML = "";
+      for (const scenario of state.scenarios) {
+        const option = document.createElement("option");
+        option.value = scenario.name;
+        option.textContent = scenario.label;
+        option.selected = scenario.name === state.selectedScenario;
+        select.appendChild(option);
+      }
+    }
+
+    function renderScenarioDetails() {
+      const scenario = currentScenario();
+      $("scenarioTitle").textContent = scenario.label || "Scenario";
+      $("scenarioDescription").textContent = scenario.description || "";
+      $("scenarioBusinessCase").textContent = scenario.businessCase || "Choose a scenario to see the product workflow it models.";
     }
 
     function renderLanguageControls() {
@@ -535,9 +616,11 @@ var indexHTML = []byte(`<!doctype html>
     }
 
     function renderAlgorithmControls() {
+      const algorithms = scenarioAlgorithms();
+      state.algorithms = algorithms;
       const select = $("algorithm");
       select.innerHTML = "";
-      for (const algo of state.algorithms) {
+      for (const algo of algorithms) {
         const option = document.createElement("option");
         option.value = algo.name;
         option.textContent = algo.label + " (" + algo.complexity + ")";
@@ -550,13 +633,15 @@ var indexHTML = []byte(`<!doctype html>
     function renderAlgorithmList() {
       const list = $("algorithmList");
       const existing = list.querySelectorAll(".algorithm");
-      if (existing.length === state.algorithms.length) {
+      const algorithms = scenarioAlgorithms();
+      if (existing.length === algorithms.length && list.dataset.scenario === state.selectedScenario) {
         updateAlgorithmCards();
         return;
       }
 
       list.innerHTML = "";
-      for (const algo of state.algorithms) {
+      list.dataset.scenario = state.selectedScenario;
+      for (const algo of algorithms) {
         const div = document.createElement("div");
         div.className = "algorithm";
         div.dataset.algorithm = algo.name;
@@ -577,10 +662,10 @@ var indexHTML = []byte(`<!doctype html>
     function updateAlgorithmCards() {
       for (const card of $("algorithmList").querySelectorAll(".algorithm")) {
         const isSelected = card.dataset.algorithm === state.selectedAlgorithm;
-        const isRunning = card.dataset.algorithm === state.activeAlgorithm && state.selectedLanguage === state.activeLanguage;
+        const isRunning = state.selectedScenario === state.activeScenario && card.dataset.algorithm === state.activeAlgorithm && state.selectedLanguage === state.activeLanguage;
         card.classList.toggle("selected", isSelected);
 
-        const algo = state.algorithms.find((candidate) => candidate.name === card.dataset.algorithm) || {};
+        const algo = scenarioAlgorithms().find((candidate) => candidate.name === card.dataset.algorithm) || {};
         const codes = algo.codeByLanguage || {};
         card.querySelector("pre code").textContent = codes[state.selectedLanguage] || algo.code || "Source snippet unavailable.";
 
@@ -595,7 +680,7 @@ var indexHTML = []byte(`<!doctype html>
       state.loadRunning = running;
       $("loadDot").className = "dot" + (running ? " running" : "");
       const timed = Number(load.durationSeconds || 0) > 0;
-      state.chartWindowSeconds = normalizeWindowSeconds(load.windowSeconds || $("window").value);
+      state.chartWindowSeconds = state.activeScenario === "lookup" ? normalizeWindowSeconds(load.windowSeconds || $("window").value) : 300;
       if (load.rate && document.activeElement !== $("rate") && !hasFieldError("rate")) {
         $("rate").value = load.rate;
       }
@@ -603,6 +688,7 @@ var indexHTML = []byte(`<!doctype html>
         setTimedRunOpen(timed);
         if (timed) $("duration").value = load.durationSeconds;
         if (load.windowSeconds) $("window").value = load.windowSeconds;
+        if (load.query && document.activeElement !== $("query")) $("query").value = load.query;
       }
       $("loadStatus").textContent = running
         ? "running " + (timed ? "for " + load.durationSeconds + "s" : "until stopped") + ", " + load.completed + " complete, " + load.inFlight + " in flight"
@@ -650,8 +736,38 @@ var indexHTML = []byte(`<!doctype html>
       return {
         rate: rate.value,
         windowSeconds: windowValue.value,
-        durationSeconds: duration.value
+        durationSeconds: duration.value,
+        query: $("query").value.trim()
       };
+    }
+
+    function renderScenarioRequestControls(resetValue = true) {
+      const scenario = currentScenario();
+      renderScenarioDetails();
+      const request = scenario.request || {};
+      numericFields.window = {
+        label: request.label || "Request value",
+        min: Number(request.min || 1),
+        max: Number(request.max || 86400),
+        unit: request.unit || "units"
+      };
+      $("requestValueLabel").textContent = numericFields.window.label;
+      $("window").min = numericFields.window.min;
+      $("window").max = numericFields.window.max;
+      if (resetValue || !$("window").value) $("window").value = request.default || numericFields.window.min;
+      $("windowHint").textContent = request.help || fieldRangeMessage("window");
+      clearFieldValidity("window");
+
+      const hasQuery = Boolean(request.queryLabel);
+      $("queryField").hidden = !hasQuery;
+      if (hasQuery) {
+        $("queryLabel").textContent = request.queryLabel;
+        if (resetValue || !$("query").value) $("query").value = request.queryDefault || "";
+        $("queryHint").textContent = request.queryHelp || "Search query.";
+      }
+
+      const endpoint = scenario.endpoint || "/profiles/recent";
+      $("loadHint").innerHTML = "Load calls <code>" + endpoint + "</code> for the selected scenario. The shown latency is measured from real algorithm executions.";
     }
 
     function setFieldValidity(id, message) {
@@ -694,6 +810,7 @@ var indexHTML = []byte(`<!doctype html>
 
     async function pollStats() {
       const data = await api("/api/stats");
+      state.activeScenario = data.activeScenario;
       state.activeLanguage = data.activeLanguage;
       state.activeAlgorithm = data.activeAlgorithm;
       state.activeImplementation = data.activeImplementation;
@@ -952,9 +1069,17 @@ var indexHTML = []byte(`<!doctype html>
     $("applyAlgorithm").addEventListener("click", async () => {
       await api("/api/algorithm", {
         method: "POST",
-        body: JSON.stringify({ language: $("language").value, name: $("algorithm").value })
+        body: JSON.stringify({ scenario: $("scenario").value, language: $("language").value, name: $("algorithm").value })
       });
       await loadState();
+    });
+
+    $("scenario").addEventListener("change", () => {
+      state.selectedScenario = $("scenario").value;
+      const scenario = currentScenario();
+      state.selectedAlgorithm = scenario.defaultAlgorithm || (scenario.algorithms && scenario.algorithms[0] && scenario.algorithms[0].name) || "";
+      renderScenarioRequestControls(true);
+      renderAlgorithmControls();
     });
 
     $("language").addEventListener("change", () => {
@@ -986,7 +1111,8 @@ var indexHTML = []byte(`<!doctype html>
             rate: form.rate,
             durationSeconds: form.durationSeconds,
             windowSeconds: form.windowSeconds,
-            includeIds: $("includeIds").checked
+            includeIds: $("includeIds").checked,
+            query: form.query
           })
         });
         setLoadFormMessage("");

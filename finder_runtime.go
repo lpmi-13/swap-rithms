@@ -39,16 +39,27 @@ type FinderRuntime interface {
 	Label() string
 	Available() bool
 	Error() string
+	Run(scenario string, algorithm string, request ScenarioRequest) (LookupResult, error)
 	Find(algorithm string, since time.Time, includeIDs bool) (LookupResult, error)
 	Close() error
 }
 
 type GoRuntime struct {
-	finders map[string]ProfileFinder
+	scenarios map[string]map[string]ScenarioAlgorithm
 }
 
-func NewGoRuntime(finders map[string]ProfileFinder) *GoRuntime {
-	return &GoRuntime{finders: finders}
+func NewGoRuntime(algorithms any) *GoRuntime {
+	runtime := &GoRuntime{scenarios: make(map[string]map[string]ScenarioAlgorithm)}
+	switch typed := algorithms.(type) {
+	case map[string]map[string]ScenarioAlgorithm:
+		runtime.scenarios = typed
+	case map[string]ProfileFinder:
+		runtime.scenarios[scenarioLookup] = make(map[string]ScenarioAlgorithm, len(typed))
+		for name, finder := range typed {
+			runtime.scenarios[scenarioLookup][name] = lookupAlgorithm{finder}
+		}
+	}
+	return runtime
 }
 
 func (r *GoRuntime) Name() string {
@@ -67,24 +78,32 @@ func (r *GoRuntime) Error() string {
 	return ""
 }
 
-func (r *GoRuntime) Find(algorithm string, since time.Time, includeIDs bool) (LookupResult, error) {
-	finder := r.finders[algorithm]
-	if finder == nil {
+func (r *GoRuntime) Run(scenario string, algorithm string, request ScenarioRequest) (LookupResult, error) {
+	algorithms := r.scenarios[scenario]
+	if algorithms == nil {
+		return LookupResult{}, fmt.Errorf("unknown scenario %q", scenario)
+	}
+	runner := algorithms[algorithm]
+	if runner == nil {
 		return LookupResult{}, fmt.Errorf("unknown algorithm %q", algorithm)
 	}
 
 	start := time.Now()
-	ids := finder.Find(since)
+	ids := runner.Run(request.normalized())
 	elapsed := time.Since(start)
 
 	result := LookupResult{
 		Count:   len(ids),
 		Elapsed: elapsed,
 	}
-	if includeIDs {
+	if request.IncludeIDs {
 		result.IDs = ids
 	}
 	return result, nil
+}
+
+func (r *GoRuntime) Find(algorithm string, since time.Time, includeIDs bool) (LookupResult, error) {
+	return r.Run(scenarioLookup, algorithm, ScenarioRequest{Since: since, IncludeIDs: includeIDs})
 }
 
 func (r *GoRuntime) Close() error {
@@ -92,12 +111,15 @@ func (r *GoRuntime) Close() error {
 }
 
 type WorkerRuntime struct {
-	name       string
-	label      string
-	executable string
-	args       []string
-	sourceName string
-	source     string
+	name                string
+	label               string
+	executable          string
+	executablePath      string
+	args                []string
+	sourceName          string
+	source              string
+	profileCount        int
+	generatedAtUnixNano string
 
 	mu       sync.Mutex
 	tempDir  string
@@ -113,16 +135,20 @@ type WorkerRuntime struct {
 }
 
 func NewWorkerRuntime(name string, label string, executable string, args []string, sourceName string, source string, dataset *Dataset) *WorkerRuntime {
+	executablePath, err := exec.LookPath(executable)
 	runtime := &WorkerRuntime{
-		name:       name,
-		label:      label,
-		executable: executable,
-		args:       args,
-		sourceName: sourceName,
-		source:     source,
+		name:                name,
+		label:               label,
+		executable:          executable,
+		executablePath:      executablePath,
+		args:                args,
+		sourceName:          sourceName,
+		source:              source,
+		profileCount:        len(dataset.Profiles),
+		generatedAtUnixNano: strconv.FormatInt(dataset.GeneratedAt.UnixNano(), 10),
 	}
 
-	if err := runtime.start(dataset); err != nil {
+	if err != nil {
 		runtime.available = false
 		runtime.errText = err.Error()
 		log.Printf("%s runtime unavailable: %v", label, err)
@@ -166,17 +192,20 @@ func (r *WorkerRuntime) Label() string {
 }
 
 func (r *WorkerRuntime) Available() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	return r.available
 }
 
 func (r *WorkerRuntime) Error() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	return r.errText
 }
 
-func (r *WorkerRuntime) start(dataset *Dataset) error {
-	executable, err := exec.LookPath(r.executable)
-	if err != nil {
-		return err
+func (r *WorkerRuntime) startLocked() error {
+	if r.cmd != nil {
+		return nil
 	}
 
 	tempDir, err := os.MkdirTemp("", "swap-rithms-workers-*")
@@ -187,7 +216,7 @@ func (r *WorkerRuntime) start(dataset *Dataset) error {
 
 	scriptPath := filepath.Join(tempDir, r.sourceName)
 	if err := os.WriteFile(scriptPath, []byte(r.source), 0o600); err != nil {
-		_ = os.RemoveAll(tempDir)
+		_ = r.closeLocked()
 		return err
 	}
 
@@ -200,24 +229,24 @@ func (r *WorkerRuntime) start(dataset *Dataset) error {
 		args[i] = arg
 	}
 
-	cmd := exec.Command(executable, args...)
+	cmd := exec.Command(r.executablePath, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		_ = os.RemoveAll(tempDir)
+		_ = r.closeLocked()
 		return err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		_ = os.RemoveAll(tempDir)
+		_ = r.closeLocked()
 		return err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		_ = os.RemoveAll(tempDir)
+		_ = r.closeLocked()
 		return err
 	}
 	if err := cmd.Start(); err != nil {
-		_ = os.RemoveAll(tempDir)
+		_ = r.closeLocked()
 		return err
 	}
 
@@ -228,8 +257,8 @@ func (r *WorkerRuntime) start(dataset *Dataset) error {
 
 	go r.logStderr(stderr)
 
-	if err := r.sendInit(dataset); err != nil {
-		_ = r.Close()
+	if err := r.sendInitLocked(); err != nil {
+		_ = r.closeLocked()
 		return err
 	}
 	return nil
@@ -242,16 +271,13 @@ func (r *WorkerRuntime) logStderr(stderr io.Reader) {
 	}
 }
 
-func (r *WorkerRuntime) sendInit(dataset *Dataset) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
+func (r *WorkerRuntime) sendInitLocked() error {
 	id := r.nextRequestID()
 	if err := r.writeRequest(workerRequest{
 		ID:                  id,
 		Type:                "init",
-		ProfileCount:        len(dataset.Profiles),
-		GeneratedAtUnixNano: strconv.FormatInt(dataset.GeneratedAt.UnixNano(), 10),
+		ProfileCount:        r.profileCount,
+		GeneratedAtUnixNano: r.generatedAtUnixNano,
 	}); err != nil {
 		return err
 	}
@@ -274,21 +300,32 @@ func (r *WorkerRuntime) nextRequestID() int64 {
 	return r.nextID
 }
 
-func (r *WorkerRuntime) Find(algorithm string, since time.Time, includeIDs bool) (LookupResult, error) {
-	if !r.available {
-		return LookupResult{}, fmt.Errorf("%s runtime unavailable: %s", r.label, r.errText)
-	}
-
+func (r *WorkerRuntime) Run(scenario string, algorithm string, request ScenarioRequest) (LookupResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if !r.available {
+		return LookupResult{}, fmt.Errorf("%s runtime unavailable: %s", r.label, r.errText)
+	}
+	if err := r.startLocked(); err != nil {
+		r.available = false
+		r.errText = err.Error()
+		log.Printf("%s runtime unavailable: %v", r.label, err)
+		return LookupResult{}, fmt.Errorf("%s runtime unavailable: %s", r.label, r.errText)
+	}
+
 	id := r.nextRequestID()
+	request = request.normalized()
 	if err := r.writeRequest(workerRequest{
 		ID:            id,
-		Type:          "find",
+		Type:          "run",
+		Scenario:      scenario,
 		Algorithm:     algorithm,
-		SinceUnixNano: strconv.FormatInt(since.UnixNano(), 10),
-		IncludeIDs:    includeIDs,
+		SinceUnixNano: request.SinceUnixNano,
+		IncludeIDs:    request.IncludeIDs,
+		Limit:         request.Limit,
+		Query:         request.Query,
+		ProfileID:     request.ProfileID,
 	}); err != nil {
 		return LookupResult{}, err
 	}
@@ -309,6 +346,10 @@ func (r *WorkerRuntime) Find(algorithm string, since time.Time, includeIDs bool)
 		Count:   response.Count,
 		Elapsed: time.Duration(response.ElapsedMicros) * time.Microsecond,
 	}, nil
+}
+
+func (r *WorkerRuntime) Find(algorithm string, since time.Time, includeIDs bool) (LookupResult, error) {
+	return r.Run(scenarioLookup, algorithm, ScenarioRequest{Since: since, IncludeIDs: includeIDs})
 }
 
 func (r *WorkerRuntime) writeRequest(request workerRequest) error {
@@ -334,6 +375,10 @@ func (r *WorkerRuntime) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	return r.closeLocked()
+}
+
+func (r *WorkerRuntime) closeLocked() error {
 	if r.stdin != nil {
 		_ = r.writeRequest(workerRequest{Type: "shutdown"})
 		_ = r.stdin.Close()
@@ -379,8 +424,12 @@ type workerRequest struct {
 	ProfileCount        int    `json:"profileCount,omitempty"`
 	GeneratedAtUnixNano string `json:"generatedAtUnixNano,omitempty"`
 	Algorithm           string `json:"algorithm,omitempty"`
+	Scenario            string `json:"scenario,omitempty"`
 	SinceUnixNano       string `json:"sinceUnixNano,omitempty"`
 	IncludeIDs          bool   `json:"includeIds"`
+	Limit               int    `json:"limit,omitempty"`
+	Query               string `json:"query,omitempty"`
+	ProfileID           int    `json:"profileId,omitempty"`
 }
 
 type workerResponse struct {

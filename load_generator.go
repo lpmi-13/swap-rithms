@@ -7,16 +7,18 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
 type LoadRequest struct {
-	Rate            int  `json:"rate"`
-	DurationSeconds int  `json:"durationSeconds"`
-	WindowSeconds   int  `json:"windowSeconds"`
-	IncludeIDs      bool `json:"includeIds"`
+	Rate            int    `json:"rate"`
+	DurationSeconds int    `json:"durationSeconds"`
+	WindowSeconds   int    `json:"windowSeconds"`
+	IncludeIDs      bool   `json:"includeIds"`
+	Query           string `json:"query,omitempty"`
 }
 
 type LoadGeneratorState struct {
@@ -25,6 +27,7 @@ type LoadGeneratorState struct {
 	DurationSeconds int        `json:"durationSeconds"`
 	WindowSeconds   int        `json:"windowSeconds"`
 	IncludeIDs      bool       `json:"includeIds"`
+	Query           string     `json:"query,omitempty"`
 	StartedAt       time.Time  `json:"startedAt,omitempty"`
 	StopsAt         *time.Time `json:"stopsAt,omitempty"`
 	Completed       uint64     `json:"completed"`
@@ -62,11 +65,18 @@ func (g *LoadGenerator) Start(req LoadRequest) error {
 	if req.DurationSeconds > 600 {
 		return errors.New("duration must be 600 seconds or lower")
 	}
-	if req.WindowSeconds <= 0 {
-		req.WindowSeconds = 300
+	scenario, def := g.scenarioForLoad()
+	if def == nil {
+		return errors.New("active scenario is unavailable")
 	}
-	if req.WindowSeconds > 24*60*60 {
-		return errors.New("window must be 24 hours or lower")
+	if req.WindowSeconds <= 0 {
+		req.WindowSeconds = def.RequestDefault
+	}
+	if req.WindowSeconds < def.RequestMin || req.WindowSeconds > def.RequestMax {
+		return fmt.Errorf("%s must be between %d and %d", strings.ToLower(def.RequestLabel), def.RequestMin, def.RequestMax)
+	}
+	if scenario == scenarioTextSearch && strings.TrimSpace(req.Query) == "" {
+		req.Query = def.QueryDefault
 	}
 
 	g.mu.Lock()
@@ -88,6 +98,7 @@ func (g *LoadGenerator) Start(req LoadRequest) error {
 		DurationSeconds: req.DurationSeconds,
 		WindowSeconds:   req.WindowSeconds,
 		IncludeIDs:      req.IncludeIDs,
+		Query:           req.Query,
 		StartedAt:       now,
 	}
 	if req.DurationSeconds > 0 {
@@ -210,22 +221,13 @@ func ratePeriod(rate int) time.Duration {
 func (g *LoadGenerator) sendOne(ctx context.Context, client *http.Client, req LoadRequest) {
 	defer g.inFlight.Add(-1)
 
-	target := url.URL{
-		Path: "/profiles/recent",
-	}
-	parsedBase, err := url.Parse(g.lab.selfURL)
+	target, err := g.loadURL(req)
 	if err != nil {
 		g.errors.Add(1)
 		return
 	}
-	target.Scheme = parsedBase.Scheme
-	target.Host = parsedBase.Host
-	query := target.Query()
-	query.Set("window", fmt.Sprintf("%ds", req.WindowSeconds))
-	query.Set("ids", fmt.Sprintf("%t", req.IncludeIDs))
-	target.RawQuery = query.Encode()
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		g.errors.Add(1)
 		return
@@ -243,6 +245,73 @@ func (g *LoadGenerator) sendOne(ctx context.Context, client *http.Client, req Lo
 		return
 	}
 	g.completed.Add(1)
+}
+
+func (g *LoadGenerator) scenarioForLoad() (string, *ScenarioDefinition) {
+	g.lab.mu.RLock()
+	defer g.lab.mu.RUnlock()
+	scenario := g.lab.activeScenario
+	if scenario == "" {
+		scenario = scenarioLookup
+	}
+	if g.lab.scenarios == nil {
+		return scenario, &ScenarioDefinition{
+			Name:           scenarioLookup,
+			Endpoint:       "/profiles/recent",
+			RequestLabel:   "Recent window seconds",
+			RequestMin:     1,
+			RequestMax:     86400,
+			RequestDefault: 300,
+		}
+	}
+	return scenario, g.lab.scenarios[scenario]
+}
+
+func (g *LoadGenerator) loadURL(req LoadRequest) (string, error) {
+	scenario, def := g.scenarioForLoad()
+	if def == nil {
+		return "", errors.New("active scenario is unavailable")
+	}
+
+	parsedBase, err := url.Parse(g.lab.selfURL)
+	if err != nil {
+		return "", err
+	}
+
+	value := req.WindowSeconds
+	if value <= 0 {
+		value = def.RequestDefault
+	}
+	value = max(def.RequestMin, min(value, def.RequestMax))
+
+	target := url.URL{
+		Scheme: parsedBase.Scheme,
+		Host:   parsedBase.Host,
+		Path:   def.Endpoint,
+	}
+	query := target.Query()
+	query.Set("ids", fmt.Sprintf("%t", req.IncludeIDs))
+	switch scenario {
+	case scenarioLookup:
+		query.Set("window", fmt.Sprintf("%ds", value))
+	case scenarioTopK:
+		query.Set("k", fmt.Sprintf("%d", value))
+	case scenarioSorting:
+		query.Set("limit", fmt.Sprintf("%d", value))
+	case scenarioCaching:
+		hotRange := max(1, min(value, len(g.lab.dataset.Profiles)))
+		sequence := int(g.completed.Load()+uint64(max(0, int(g.inFlight.Load())))) + 1
+		id := 1 + (sequence % hotRange)
+		if sequence%10 == 0 {
+			id = 1 + ((sequence * 7919) % max(1, len(g.lab.dataset.Profiles)))
+		}
+		query.Set("id", fmt.Sprintf("%d", id))
+	case scenarioTextSearch:
+		query.Set("limit", fmt.Sprintf("%d", value))
+		query.Set("q", strings.TrimSpace(req.Query))
+	}
+	target.RawQuery = query.Encode()
+	return target.String(), nil
 }
 
 func (g *LoadGenerator) markStopped() {

@@ -83,6 +83,7 @@ func (m *Metrics) MarkAlgorithmSwitch(_ string) {
 }
 
 type StatsSnapshot struct {
+	ActiveScenario       string                  `json:"activeScenario"`
 	ActiveLanguage       string                  `json:"activeLanguage"`
 	ActiveAlgorithm      string                  `json:"activeAlgorithm"`
 	ActiveImplementation string                  `json:"activeImplementation"`

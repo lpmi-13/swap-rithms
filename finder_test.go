@@ -146,7 +146,7 @@ func TestLabCanServeSelectedLanguageRuntime(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Language != languagePython || response.Algorithm != "binary_search" || response.Implementation != "python:binary_search" {
+	if response.Scenario != scenarioLookup || response.Language != languagePython || response.Algorithm != "binary_search" || response.Implementation != "lookup:python:binary_search" {
 		t.Fatalf("unexpected implementation in response: %+v", response)
 	}
 	if response.ElapsedMicros <= 0 {
@@ -154,8 +154,118 @@ func TestLabCanServeSelectedLanguageRuntime(t *testing.T) {
 	}
 
 	stats := lab.metrics.Snapshot()
-	if stats.Algorithms["python:binary_search"].Requests != 1 {
-		t.Fatalf("expected metric for python:binary_search, got %+v", stats.Algorithms)
+	if stats.Algorithms["lookup:python:binary_search"].Requests != 1 {
+		t.Fatalf("expected metric for lookup:python:binary_search, got %+v", stats.Algorithms)
+	}
+}
+
+func TestNewLabDefersExternalRuntimeStartup(t *testing.T) {
+	dataset := NewDataset(100)
+	lab := NewLab(dataset, "http://127.0.0.1:0")
+	defer lab.Close()
+
+	for _, language := range []string{languagePython, languageTypeScript} {
+		runtime, ok := lab.runtimes[language].(*WorkerRuntime)
+		if !ok {
+			t.Fatalf("%s runtime has type %T, want *WorkerRuntime", language, lab.runtimes[language])
+		}
+
+		runtime.mu.Lock()
+		started := runtime.cmd != nil
+		runtime.mu.Unlock()
+		if started {
+			t.Fatalf("%s runtime started during lab construction", language)
+		}
+	}
+}
+
+func TestScenarioAlgorithmsReturnEquivalentIDs(t *testing.T) {
+	dataset := NewDataset(2_000)
+	scenarios, order := NewScenarioRegistry(dataset)
+
+	for _, scenarioName := range order {
+		scenario := scenarios[scenarioName]
+		request := testScenarioRequest(dataset, scenarioName)
+		want := scenario.Algorithms[scenario.Order[0]].Run(request)
+		for _, algorithmName := range scenario.Order[1:] {
+			got := scenario.Algorithms[algorithmName].Run(request)
+			if !scenario.Verify(got, want) {
+				t.Fatalf("%s/%s returned different ids: got %v want %v", scenarioName, algorithmName, got[:min(len(got), 5)], want[:min(len(want), 5)])
+			}
+		}
+	}
+}
+
+func TestScenarioAlgorithmInfoIncludesSourceCode(t *testing.T) {
+	dataset := NewDataset(100)
+	scenarios, order := NewScenarioRegistry(dataset)
+
+	for _, scenarioName := range order {
+		scenario := scenarios[scenarioName]
+		for _, algorithmName := range scenario.Order {
+			info := algorithmInfo(scenario.Algorithms[algorithmName])
+			if info.Code == "" {
+				t.Fatalf("%s/%s has no Go source code snippet", scenarioName, algorithmName)
+			}
+			for _, language := range []string{languageGo, languagePython, languageTypeScript} {
+				if info.CodeByLanguage[language] == "" {
+					t.Fatalf("%s/%s has no %s source code snippet", scenarioName, algorithmName, language)
+				}
+			}
+		}
+	}
+}
+
+func TestWorkerRuntimesReturnSameScenarioResults(t *testing.T) {
+	dataset := NewDataset(750)
+	scenarios, order := NewScenarioRegistry(dataset)
+	goAlgorithms := make(map[string]map[string]ScenarioAlgorithm, len(scenarios))
+	for name, scenario := range scenarios {
+		goAlgorithms[name] = scenario.Algorithms
+	}
+	goRuntime := NewGoRuntime(goAlgorithms)
+	runtimes := []FinderRuntime{
+		NewPythonRuntime(dataset),
+		NewTypeScriptRuntime(dataset),
+	}
+	defer func() {
+		for _, runtime := range runtimes {
+			_ = runtime.Close()
+		}
+	}()
+
+	checked := 0
+	for _, runtime := range runtimes {
+		if !runtime.Available() {
+			t.Logf("%s runtime unavailable: %s", runtime.Label(), runtime.Error())
+			continue
+		}
+		checked++
+
+		for _, scenarioName := range order {
+			scenario := scenarios[scenarioName]
+			request := testScenarioRequest(dataset, scenarioName)
+			for _, algorithmName := range scenario.Order {
+				want, err := goRuntime.Run(scenarioName, algorithmName, request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := runtime.Run(scenarioName, algorithmName, request)
+				if err != nil {
+					t.Fatalf("%s %s/%s returned error: %v", runtime.Name(), scenarioName, algorithmName, err)
+				}
+				if got.Count != want.Count {
+					t.Fatalf("%s %s/%s returned count %d, want %d", runtime.Name(), scenarioName, algorithmName, got.Count, want.Count)
+				}
+				if !scenario.Verify(got.IDs, want.IDs) {
+					t.Fatalf("%s %s/%s returned different ids: got %v want %v", runtime.Name(), scenarioName, algorithmName, got.IDs[:min(len(got.IDs), 5)], want.IDs[:min(len(want.IDs), 5)])
+				}
+			}
+		}
+	}
+
+	if checked == 0 {
+		t.Skip("no external language runtimes available")
 	}
 }
 
@@ -289,4 +399,38 @@ func testFinderMap(dataset *Dataset) map[string]ProfileFinder {
 		finders[finder.Name()] = finder
 	}
 	return finders
+}
+
+func testScenarioRequest(dataset *Dataset, scenario string) ScenarioRequest {
+	switch scenario {
+	case scenarioLookup:
+		return ScenarioRequest{
+			Since:      dataset.GeneratedAt.Add(-5 * time.Minute),
+			IncludeIDs: true,
+		}
+	case scenarioTopK:
+		return ScenarioRequest{
+			Limit:      25,
+			IncludeIDs: true,
+		}
+	case scenarioSorting:
+		return ScenarioRequest{
+			Limit:      25,
+			IncludeIDs: true,
+		}
+	case scenarioCaching:
+		return ScenarioRequest{
+			ProfileID:  42,
+			Limit:      100,
+			IncludeIDs: true,
+		}
+	case scenarioTextSearch:
+		return ScenarioRequest{
+			Query:      "platform",
+			Limit:      25,
+			IncludeIDs: true,
+		}
+	default:
+		return ScenarioRequest{IncludeIDs: true}
+	}
 }
