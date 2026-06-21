@@ -264,6 +264,10 @@ var indexHTML = []byte(`<!doctype html>
         <h2>Implementation</h2>
         <div class="row control-row">
           <label>
+            Language
+            <select id="language"></select>
+          </label>
+          <label>
             Active algorithm
             <select id="algorithm"></select>
           </label>
@@ -325,8 +329,12 @@ var indexHTML = []byte(`<!doctype html>
 
   <script>
     const state = {
+      activeLanguage: "go",
       activeAlgorithm: "slice_scan",
+      activeImplementation: "go:slice_scan",
+      selectedLanguage: "go",
       selectedAlgorithm: "slice_scan",
+      languages: [],
       algorithms: [],
       rpsHistory: [],
       latencyHistory: []
@@ -349,12 +357,31 @@ var indexHTML = []byte(`<!doctype html>
 
     async function loadState() {
       const data = await api("/api/state");
+      state.activeLanguage = data.activeLanguage;
       state.activeAlgorithm = data.activeAlgorithm;
+      state.activeImplementation = data.activeImplementation;
+      state.languages = data.languages || [];
       state.algorithms = data.algorithms;
+      state.selectedLanguage = data.activeLanguage;
       state.selectedAlgorithm = data.activeAlgorithm;
       $("profileCount").textContent = fmt.format(data.profileCount) + " profiles";
+      renderLanguageControls();
       renderAlgorithmControls();
       renderLoad(data.load);
+    }
+
+    function renderLanguageControls() {
+      const select = $("language");
+      select.innerHTML = "";
+      for (const language of state.languages) {
+        const option = document.createElement("option");
+        option.value = language.name;
+        option.textContent = language.label + (language.available ? "" : " (unavailable)");
+        option.disabled = !language.available;
+        option.title = language.error || "";
+        option.selected = language.name === state.selectedLanguage;
+        select.appendChild(option);
+      }
     }
 
     function renderAlgorithmControls() {
@@ -392,7 +419,6 @@ var indexHTML = []byte(`<!doctype html>
         div.querySelector("strong").textContent = algo.label;
         div.querySelector(".complexity").innerHTML = "<code>" + algo.complexity + "</code>";
         div.querySelector(".muted").textContent = algo.description;
-        div.querySelector("pre code").textContent = algo.code || "Source snippet unavailable.";
         list.appendChild(div);
       }
       requestAnimationFrame(updateAlgorithmCards);
@@ -401,8 +427,12 @@ var indexHTML = []byte(`<!doctype html>
     function updateAlgorithmCards() {
       for (const card of $("algorithmList").querySelectorAll(".algorithm")) {
         const isSelected = card.dataset.algorithm === state.selectedAlgorithm;
-        const isRunning = card.dataset.algorithm === state.activeAlgorithm;
+        const isRunning = card.dataset.algorithm === state.activeAlgorithm && state.selectedLanguage === state.activeLanguage;
         card.classList.toggle("selected", isSelected);
+
+        const algo = state.algorithms.find((candidate) => candidate.name === card.dataset.algorithm) || {};
+        const codes = algo.codeByLanguage || {};
+        card.querySelector("pre code").textContent = codes[state.selectedLanguage] || algo.code || "Source snippet unavailable.";
 
         const badge = card.querySelector(".badge");
         badge.textContent = isRunning ? "Running" : "";
@@ -422,8 +452,10 @@ var indexHTML = []byte(`<!doctype html>
 
     async function pollStats() {
       const data = await api("/api/stats");
+      state.activeLanguage = data.activeLanguage;
       state.activeAlgorithm = data.activeAlgorithm;
-      const active = data.algorithms[data.activeAlgorithm] || {};
+      state.activeImplementation = data.activeImplementation;
+      const active = data.algorithms[data.activeImplementation] || {};
       $("rps").textContent = fmt.format(active.recentRps || 0) + " rps";
       $("p95").textContent = fmt.format(active.p95Ms || 0) + " ms";
       $("p99").textContent = fmt.format(active.p99Ms || 0) + " ms";
@@ -482,9 +514,14 @@ var indexHTML = []byte(`<!doctype html>
     $("applyAlgorithm").addEventListener("click", async () => {
       await api("/api/algorithm", {
         method: "POST",
-        body: JSON.stringify({ name: $("algorithm").value })
+        body: JSON.stringify({ language: $("language").value, name: $("algorithm").value })
       });
       await loadState();
+    });
+
+    $("language").addEventListener("change", () => {
+      state.selectedLanguage = $("language").value;
+      updateAlgorithmCards();
     });
 
     $("algorithm").addEventListener("change", () => {

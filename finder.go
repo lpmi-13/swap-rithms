@@ -16,20 +16,22 @@ type ProfileFinder interface {
 }
 
 type FinderInfo struct {
-	Name        string `json:"name"`
-	Label       string `json:"label"`
-	Complexity  string `json:"complexity"`
-	Description string `json:"description"`
-	Code        string `json:"code"`
+	Name           string            `json:"name"`
+	Label          string            `json:"label"`
+	Complexity     string            `json:"complexity"`
+	Description    string            `json:"description"`
+	Code           string            `json:"code"`
+	CodeByLanguage map[string]string `json:"codeByLanguage"`
 }
 
 func finderInfo(f ProfileFinder) FinderInfo {
 	return FinderInfo{
-		Name:        f.Name(),
-		Label:       f.Label(),
-		Complexity:  f.Complexity(),
-		Description: f.Description(),
-		Code:        finderCodeFor(f.Name()),
+		Name:           f.Name(),
+		Label:          f.Label(),
+		Complexity:     f.Complexity(),
+		Description:    f.Description(),
+		Code:           finderCodeFor(f.Name(), "go"),
+		CodeByLanguage: finderCodesFor(f.Name()),
 	}
 }
 

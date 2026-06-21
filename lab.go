@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -11,12 +12,15 @@ import (
 )
 
 type Lab struct {
-	dataset *Dataset
-	selfURL string
-	finders map[string]ProfileFinder
-	order   []string
+	dataset   *Dataset
+	selfURL   string
+	finders   map[string]ProfileFinder
+	order     []string
+	runtimes  map[string]FinderRuntime
+	languages []string
 
 	mu              sync.RWMutex
+	activeLanguage  string
 	activeAlgorithm string
 
 	metrics *Metrics
@@ -36,6 +40,9 @@ func NewLab(dataset *Dataset, selfURL string) *Lab {
 		dataset:         dataset,
 		selfURL:         selfURL,
 		finders:         make(map[string]ProfileFinder, len(finders)),
+		runtimes:        make(map[string]FinderRuntime, 3),
+		languages:       []string{languageGo, languagePython, languageTypeScript},
+		activeLanguage:  languageGo,
 		activeAlgorithm: "slice_scan",
 		metrics:         NewMetrics(),
 	}
@@ -43,12 +50,20 @@ func NewLab(dataset *Dataset, selfURL string) *Lab {
 		lab.finders[finder.Name()] = finder
 		lab.order = append(lab.order, finder.Name())
 	}
+	lab.runtimes[languageGo] = NewGoRuntime(lab.finders)
+	lab.runtimes[languagePython] = NewPythonRuntime(dataset)
+	lab.runtimes[languageTypeScript] = NewTypeScriptRuntime(dataset)
 	lab.loadGen = NewLoadGenerator(lab)
 	return lab
 }
 
 func (l *Lab) Close() {
 	l.loadGen.Stop()
+	for _, runtime := range l.runtimes {
+		if err := runtime.Close(); err != nil {
+			log.Printf("close %s runtime: %v", runtime.Name(), err)
+		}
+	}
 }
 
 func (l *Lab) RegisterRoutes(mux *http.ServeMux) {
@@ -62,23 +77,41 @@ func (l *Lab) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/metrics", l.handlePrometheusMetrics)
 }
 
-func (l *Lab) activeFinder() ProfileFinder {
+func (l *Lab) activeRuntime() (string, string, FinderRuntime) {
 	l.mu.RLock()
-	name := l.activeAlgorithm
-	finder := l.finders[name]
+	language := l.activeLanguage
+	algorithm := l.activeAlgorithm
+	runtime := l.runtimes[language]
 	l.mu.RUnlock()
-	return finder
+	return language, algorithm, runtime
 }
 
-func (l *Lab) setAlgorithm(name string) error {
-	name = strings.TrimSpace(name)
+func (l *Lab) setImplementation(language string, algorithm string) error {
+	language = strings.TrimSpace(language)
+	algorithm = strings.TrimSpace(algorithm)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if _, ok := l.finders[name]; !ok {
-		return fmt.Errorf("unknown algorithm %q", name)
+	if language == "" {
+		language = l.activeLanguage
 	}
-	l.activeAlgorithm = name
+	if algorithm == "" {
+		algorithm = l.activeAlgorithm
+	}
+
+	runtime := l.runtimes[language]
+	if runtime == nil {
+		return fmt.Errorf("unknown language %q", language)
+	}
+	if !runtime.Available() {
+		return fmt.Errorf("%s runtime unavailable: %s", runtime.Label(), runtime.Error())
+	}
+	if _, ok := l.finders[algorithm]; !ok {
+		return fmt.Errorf("unknown algorithm %q", algorithm)
+	}
+
+	l.activeLanguage = language
+	l.activeAlgorithm = algorithm
 	return nil
 }
 
@@ -86,6 +119,20 @@ func (l *Lab) algorithmInfos() []FinderInfo {
 	infos := make([]FinderInfo, 0, len(l.order))
 	for _, name := range l.order {
 		infos = append(infos, finderInfo(l.finders[name]))
+	}
+	return infos
+}
+
+func (l *Lab) languageInfos() []LanguageInfo {
+	infos := make([]LanguageInfo, 0, len(l.languages))
+	for _, name := range l.languages {
+		runtime := l.runtimes[name]
+		infos = append(infos, LanguageInfo{
+			Name:      runtime.Name(),
+			Label:     runtime.Label(),
+			Available: runtime.Available(),
+			Error:     runtime.Error(),
+		})
 	}
 	return infos
 }
@@ -107,32 +154,44 @@ func (l *Lab) handleRecentProfiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	includeIDs := parseBoolDefault(r.URL.Query().Get("ids"), true)
-	finder := l.activeFinder()
-	start := time.Now()
-	ids := finder.Find(since)
-	elapsed := time.Since(start)
+	language, algorithm, runtime := l.activeRuntime()
+	if runtime == nil {
+		writeError(w, http.StatusInternalServerError, "active runtime unavailable")
+		return
+	}
 
-	l.metrics.Observe(finder.Name(), elapsed)
+	result, err := runtime.Find(algorithm, since, includeIDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	implementation := implementationKey(language, algorithm)
+	l.metrics.Observe(implementation, result.Elapsed)
 
 	response := RecentProfilesResponse{
-		Algorithm:     finder.Name(),
-		Since:         since,
-		Count:         len(ids),
-		ElapsedMicros: elapsed.Microseconds(),
+		Language:       language,
+		Algorithm:      algorithm,
+		Implementation: implementation,
+		Since:          since,
+		Count:          result.Count,
+		ElapsedMicros:  result.Elapsed.Microseconds(),
 	}
 	if includeIDs {
-		response.IDs = ids
+		response.IDs = result.IDs
 	}
 
 	writeJSON(w, http.StatusOK, response)
 }
 
 type RecentProfilesResponse struct {
-	Algorithm     string    `json:"algorithm"`
-	Since         time.Time `json:"since"`
-	Count         int       `json:"count"`
-	ElapsedMicros int64     `json:"elapsedMicros"`
-	IDs           []int     `json:"ids,omitempty"`
+	Language       string    `json:"language"`
+	Algorithm      string    `json:"algorithm"`
+	Implementation string    `json:"implementation"`
+	Since          time.Time `json:"since"`
+	Count          int       `json:"count"`
+	ElapsedMicros  int64     `json:"elapsedMicros"`
+	IDs            []int     `json:"ids,omitempty"`
 }
 
 func parseSince(r *http.Request) (time.Time, error) {
@@ -178,22 +237,28 @@ func (l *Lab) handleState(w http.ResponseWriter, r *http.Request) {
 }
 
 func (l *Lab) stateResponse() StateResponse {
-	finder := l.activeFinder()
+	language, algorithm, _ := l.activeRuntime()
 	return StateResponse{
-		ActiveAlgorithm: finder.Name(),
-		Algorithms:      l.algorithmInfos(),
-		ProfileCount:    len(l.dataset.Profiles),
-		GeneratedAt:     l.dataset.GeneratedAt,
-		Load:            l.loadGen.State(),
+		ActiveLanguage:       language,
+		ActiveAlgorithm:      algorithm,
+		ActiveImplementation: implementationKey(language, algorithm),
+		Languages:            l.languageInfos(),
+		Algorithms:           l.algorithmInfos(),
+		ProfileCount:         len(l.dataset.Profiles),
+		GeneratedAt:          l.dataset.GeneratedAt,
+		Load:                 l.loadGen.State(),
 	}
 }
 
 type StateResponse struct {
-	ActiveAlgorithm string             `json:"activeAlgorithm"`
-	Algorithms      []FinderInfo       `json:"algorithms"`
-	ProfileCount    int                `json:"profileCount"`
-	GeneratedAt     time.Time          `json:"generatedAt"`
-	Load            LoadGeneratorState `json:"load"`
+	ActiveLanguage       string             `json:"activeLanguage"`
+	ActiveAlgorithm      string             `json:"activeAlgorithm"`
+	ActiveImplementation string             `json:"activeImplementation"`
+	Languages            []LanguageInfo     `json:"languages"`
+	Algorithms           []FinderInfo       `json:"algorithms"`
+	ProfileCount         int                `json:"profileCount"`
+	GeneratedAt          time.Time          `json:"generatedAt"`
+	Load                 LoadGeneratorState `json:"load"`
 }
 
 func (l *Lab) handleAlgorithm(w http.ResponseWriter, r *http.Request) {
@@ -203,17 +268,19 @@ func (l *Lab) handleAlgorithm(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Name string `json:"name"`
+		Name     string `json:"name"`
+		Language string `json:"language"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	if err := l.setAlgorithm(req.Name); err != nil {
+	if err := l.setImplementation(req.Language, req.Name); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	l.metrics.MarkAlgorithmSwitch(req.Name)
+	language, algorithm, _ := l.activeRuntime()
+	l.metrics.MarkAlgorithmSwitch(implementationKey(language, algorithm))
 	writeJSON(w, http.StatusOK, l.stateResponse())
 }
 
@@ -250,9 +317,12 @@ func (l *Lab) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	finder := l.activeFinder()
+	language, algorithm, _ := l.activeRuntime()
+	implementation := implementationKey(language, algorithm)
 	stats := l.metrics.Snapshot()
-	stats.ActiveAlgorithm = finder.Name()
+	stats.ActiveLanguage = language
+	stats.ActiveAlgorithm = algorithm
+	stats.ActiveImplementation = implementation
 	stats.Load = l.loadGen.State()
 	stats.Runtime = ReadRuntimeStats()
 	writeJSON(w, http.StatusOK, stats)
@@ -264,9 +334,13 @@ func (l *Lab) handlePrometheusMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	finder := l.activeFinder()
+	language, algorithm, _ := l.activeRuntime()
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	_, _ = w.Write([]byte(l.metrics.PrometheusText(finder.Name(), ReadRuntimeStats(), l.loadGen.State())))
+	_, _ = w.Write([]byte(l.metrics.PrometheusText(implementationKey(language, algorithm), ReadRuntimeStats(), l.loadGen.State())))
+}
+
+func implementationKey(language string, algorithm string) string {
+	return language + ":" + algorithm
 }
 
 func sortedIDs(ids []int) []int {

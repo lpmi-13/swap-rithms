@@ -83,13 +83,15 @@ func (m *Metrics) MarkAlgorithmSwitch(_ string) {
 }
 
 type StatsSnapshot struct {
-	ActiveAlgorithm string                  `json:"activeAlgorithm"`
-	UptimeSeconds   int64                   `json:"uptimeSeconds"`
-	SinceSwitchSec  int64                   `json:"sinceSwitchSeconds"`
-	Algorithms      map[string]AlgoSnapshot `json:"algorithms"`
-	RecentEvents    []MetricEvent           `json:"recentEvents"`
-	Load            LoadGeneratorState      `json:"load"`
-	Runtime         RuntimeStats            `json:"runtime"`
+	ActiveLanguage       string                  `json:"activeLanguage"`
+	ActiveAlgorithm      string                  `json:"activeAlgorithm"`
+	ActiveImplementation string                  `json:"activeImplementation"`
+	UptimeSeconds        int64                   `json:"uptimeSeconds"`
+	SinceSwitchSec       int64                   `json:"sinceSwitchSeconds"`
+	Algorithms           map[string]AlgoSnapshot `json:"algorithms"`
+	RecentEvents         []MetricEvent           `json:"recentEvents"`
+	Load                 LoadGeneratorState      `json:"load"`
+	Runtime              RuntimeStats            `json:"runtime"`
 }
 
 type AlgoSnapshot struct {

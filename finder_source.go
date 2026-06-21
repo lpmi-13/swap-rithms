@@ -12,18 +12,34 @@ import (
 //go:embed finder.go
 var finderSource string
 
+//go:embed workers/finders.py
+var pythonFinderSource string
+
+//go:embed workers/finders.ts
+var typescriptFinderSource string
+
 var (
 	finderCodeOnce sync.Once
-	finderCodeMap  map[string]string
+	finderCodeMap  map[string]map[string]string
 )
 
-func finderCodeFor(name string) string {
+func finderCodeFor(name string, language string) string {
 	finderCodeOnce.Do(loadFinderCode)
-	return finderCodeMap[name]
+	return finderCodeMap[name][language]
+}
+
+func finderCodesFor(name string) map[string]string {
+	finderCodeOnce.Do(loadFinderCode)
+
+	codes := make(map[string]string, len(finderCodeMap[name]))
+	for language, code := range finderCodeMap[name] {
+		codes[language] = code
+	}
+	return codes
 }
 
 func loadFinderCode() {
-	finderCodeMap = make(map[string]string)
+	finderCodeMap = make(map[string]map[string]string)
 	typesByName := map[string]string{
 		"slice_scan":     "*SliceScanFinder",
 		"binary_search":  "*BinarySearchFinder",
@@ -40,9 +56,22 @@ func loadFinderCode() {
 
 	for name, receiver := range typesByName {
 		if code := findMethodSource(fset, file, receiver, "Find"); code != "" {
-			finderCodeMap[name] = code
+			setFinderCode(name, "go", code)
 		}
+		setFinderCode(name, "python", findMarkedSnippet(pythonFinderSource, name))
+		setFinderCode(name, "typescript", findMarkedSnippet(typescriptFinderSource, name))
 	}
+}
+
+func setFinderCode(name string, language string, code string) {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return
+	}
+	if finderCodeMap[name] == nil {
+		finderCodeMap[name] = make(map[string]string)
+	}
+	finderCodeMap[name][language] = code
 }
 
 func findMethodSource(fset *token.FileSet, file *ast.File, receiver string, method string) string {
@@ -74,4 +103,25 @@ func receiverTypeName(expr ast.Expr) string {
 	default:
 		return ""
 	}
+}
+
+func findMarkedSnippet(source string, name string) string {
+	startMarker := "snippet:" + name + ":start"
+	endMarker := "snippet:" + name + ":end"
+
+	start := strings.Index(source, startMarker)
+	if start < 0 {
+		return ""
+	}
+	startLineEnd := strings.IndexByte(source[start:], '\n')
+	if startLineEnd < 0 {
+		return ""
+	}
+	start += startLineEnd + 1
+
+	end := strings.Index(source[start:], endMarker)
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(source[start : start+end])
 }
