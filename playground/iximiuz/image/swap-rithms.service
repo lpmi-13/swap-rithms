@@ -1,0 +1,18 @@
+[Unit]
+Description=Swap-rithms Algorithm Lab
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=laborant
+Group=laborant
+WorkingDirectory=/opt/swap-rithms
+Environment=ADDR=0.0.0.0:8080
+Environment=PROFILE_COUNT=500000
+ExecStart=/usr/local/bin/swap-rithms
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

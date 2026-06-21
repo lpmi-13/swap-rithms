@@ -1,0 +1,92 @@
+kind: playground
+name: swap-rithms-325942ce
+base: flexbox
+title: Swap-rithms Algorithm Lab
+description: Compare Go, Python, and TypeScript implementations of the same profile lookup algorithms under load.
+categories:
+  - linux
+  - programming
+  - observability
+markdown: |-
+  This playground runs Swap-rithms, a small web lab for comparing implementations
+  of "find recently updated profile IDs" across Go, Python, and TypeScript.
+
+  Use the web tab to change the active language and algorithm, start load, and
+  watch the measured latency and throughput update in real time.
+playground:
+  networks:
+    - name: local
+      subnet: 172.16.0.0/24
+  machines:
+    - name: lab-01
+      users:
+        - name: root
+        - name: laborant
+          default: true
+          welcome: |
+            Swap-rithms is already running on this VM.
+
+            Open the "Swap-rithms" tab to use the browser UI.
+
+            Useful checks:
+              curl -fsS http://127.0.0.1:8080/api/state | jq
+              curl -fsS 'http://127.0.0.1:8080/profiles/recent?window=5m&ids=false' | jq
+              systemctl status swap-rithms
+
+            The source snapshot is available at:
+              ~/swap-rithms
+      drives:
+        - source: oci://ghcr.io/lpmi-13/swap-rithms-rootfs:v1
+          mount: /
+          size: 20GiB
+      network:
+        interfaces:
+          - address: 172.16.0.2/24
+            network: local
+      resources:
+        cpuCount: 2
+        ramSize: 4GiB
+  tabs:
+    - id: terminal-lab-01
+      kind: terminal
+      name: lab-01
+      machine: lab-01
+    - id: swap-rithms
+      kind: http-port
+      name: Swap-rithms
+      machine: lab-01
+      number: 8080
+      access: public
+  initTasks:
+    init_lab_01_1:
+      name: init_lab_01_1
+      machine: lab-01
+      init: true
+      user: root
+      timeout_seconds: 180
+      run: |-
+        #!/bin/bash
+        set -euo pipefail
+
+        systemctl reset-failed swap-rithms.service || true
+        systemctl restart swap-rithms.service
+
+        deadline=$((SECONDS + 150))
+        while [ "$SECONDS" -lt "$deadline" ]; do
+          if curl -fsS http://127.0.0.1:8080/api/state >/dev/null; then
+            exit 0
+          fi
+          sleep 2
+        done
+
+        echo "swap-rithms did not become ready within 150s" >&2
+        systemctl status swap-rithms.service --no-pager >&2 || true
+        journalctl -u swap-rithms.service --no-pager -n 80 >&2 || true
+        exit 1
+  accessControl:
+    canList:
+      - anyone
+    canRead:
+      - anyone
+    canStart:
+      - anyone
