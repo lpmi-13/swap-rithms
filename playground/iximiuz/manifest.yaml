@@ -36,7 +36,7 @@ playground:
             The source snapshot is available at:
               ~/swap-rithms
       drives:
-        - source: oci://ghcr.io/lpmi-13/swap-rithms-rootfs:v1
+        - source: oci://ghcr.io/lpmi-13/swap-rithms-rootfs:v2
           mount: /
           size: 20GiB
       network:
