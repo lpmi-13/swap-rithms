@@ -110,7 +110,7 @@ func (r *GoRuntime) Run(scenario string, algorithm string, dataStructure string,
 		Elapsed: elapsed,
 	}
 	if request.IncludeIDs {
-		result.IDs = ids
+		result.IDs = limitIDs(ids, request.IDLimit)
 	}
 	return result, nil
 }
@@ -337,6 +337,7 @@ func (r *WorkerRuntime) Run(scenario string, algorithm string, dataStructure str
 		DataStructure: dataStructure,
 		SinceUnixNano: request.SinceUnixNano,
 		IncludeIDs:    request.IncludeIDs,
+		IDLimit:       request.IDLimit,
 		Limit:         request.Limit,
 		Query:         request.Query,
 		ProfileID:     request.ProfileID,
@@ -442,6 +443,7 @@ type workerRequest struct {
 	Scenario            string `json:"scenario,omitempty"`
 	SinceUnixNano       string `json:"sinceUnixNano,omitempty"`
 	IncludeIDs          bool   `json:"includeIds"`
+	IDLimit             int    `json:"idLimit,omitempty"`
 	Limit               int    `json:"limit,omitempty"`
 	Query               string `json:"query,omitempty"`
 	ProfileID           int    `json:"profileId,omitempty"`
@@ -454,4 +456,11 @@ type workerResponse struct {
 	Count         int    `json:"count"`
 	ElapsedMicros int64  `json:"elapsedMicros"`
 	IDs           []int  `json:"ids,omitempty"`
+}
+
+func limitIDs(ids []int, limit int) []int {
+	if limit > 0 && len(ids) > limit {
+		return ids[:limit]
+	}
+	return ids
 }

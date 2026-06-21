@@ -806,7 +806,8 @@ def handle_run(request):
         "elapsedMicros": elapsed_micros,
     }
     if request.get("includeIds", True):
-        response["ids"] = ids
+        id_limit = int(request.get("idLimit") or 0)
+        response["ids"] = ids[:id_limit] if id_limit > 0 else ids
     return response
 
 

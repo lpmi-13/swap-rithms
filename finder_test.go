@@ -384,6 +384,113 @@ func TestParseSinceWindow(t *testing.T) {
 	}
 }
 
+func TestParseSinceRejectsOutOfRangeWindow(t *testing.T) {
+	for _, path := range []string{"/profiles/recent?window=0s", "/profiles/recent?window=25h"} {
+		req := mustRequest(t, path)
+		if _, err := parseSince(req); err == nil {
+			t.Fatalf("expected %s to be rejected", path)
+		}
+	}
+}
+
+func TestRecentProfilesCapsReturnedIDs(t *testing.T) {
+	dataset := NewDataset(maxResponseIDs + 2_000)
+	lab := NewLab(dataset, "http://127.0.0.1:0")
+	defer lab.Close()
+
+	req := mustRequest(t, "/profiles/recent?window=24h&ids=true")
+	rec := httptest.NewRecorder()
+	lab.handleRecentProfiles(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var response RecentProfilesResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.IDs) != maxResponseIDs {
+		t.Fatalf("returned %d ids, want cap %d", len(response.IDs), maxResponseIDs)
+	}
+	if !response.IDsTruncated {
+		t.Fatal("expected idsTruncated to be true")
+	}
+	if response.Count <= len(response.IDs) {
+		t.Fatalf("count = %d, ids = %d; expected full count with capped ids", response.Count, len(response.IDs))
+	}
+}
+
+func TestJSONHandlersRejectOversizedBodies(t *testing.T) {
+	lab := NewLab(NewDataset(100), "http://127.0.0.1:0")
+	defer lab.Close()
+
+	req := mustRequest(t, "/api/load/rate")
+	req.Method = http.MethodPost
+	req.Body = io.NopCloser(strings.NewReader(strings.Repeat(" ", int(maxJSONBodyBytes)+1) + "{}"))
+	rec := httptest.NewRecorder()
+	lab.handleLoadRate(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusRequestEntityTooLarge, rec.Body.String())
+	}
+}
+
+func TestJSONHandlersRejectTrailingValues(t *testing.T) {
+	lab := NewLab(NewDataset(100), "http://127.0.0.1:0")
+	defer lab.Close()
+
+	req := mustRequest(t, "/api/load/start")
+	req.Method = http.MethodPost
+	req.Body = io.NopCloser(strings.NewReader(`{"rate":1,"windowSeconds":1} {}`))
+	rec := httptest.NewRecorder()
+	lab.handleLoadStart(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestWorkerRuntimesRespectIDLimit(t *testing.T) {
+	dataset := NewDataset(1_000)
+	runtimes := []FinderRuntime{
+		NewPythonRuntime(dataset),
+		NewTypeScriptRuntime(dataset),
+	}
+	defer func() {
+		for _, runtime := range runtimes {
+			_ = runtime.Close()
+		}
+	}()
+
+	checked := 0
+	for _, runtime := range runtimes {
+		if !runtime.Available() {
+			t.Logf("%s runtime unavailable: %s", runtime.Label(), runtime.Error())
+			continue
+		}
+		checked++
+
+		got, err := runtime.Run(scenarioLookup, "slice_scan", defaultDataStructure, ScenarioRequest{
+			Since:      dataset.GeneratedAt.Add(-24 * time.Hour),
+			IncludeIDs: true,
+			IDLimit:    5,
+		})
+		if err != nil {
+			t.Fatalf("%s returned error: %v", runtime.Name(), err)
+		}
+		if got.Count <= len(got.IDs) {
+			t.Fatalf("%s count = %d, ids = %d; expected capped ids with full count", runtime.Name(), got.Count, len(got.IDs))
+		}
+		if len(got.IDs) != 5 {
+			t.Fatalf("%s returned %d ids, want 5", runtime.Name(), len(got.IDs))
+		}
+	}
+
+	if checked == 0 {
+		t.Skip("no external language runtimes available")
+	}
+}
+
 func TestLoadGeneratorRunsIndefinitelyByDefault(t *testing.T) {
 	generator := NewLoadGenerator(&Lab{selfURL: "http://127.0.0.1:1"})
 	if err := generator.Start(LoadRequest{Rate: 1, WindowSeconds: 1}); err != nil {

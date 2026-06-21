@@ -45,6 +45,7 @@ interface WorkerRequest {
   dataStructure?: string;
   sinceUnixNano?: string;
   includeIds?: boolean;
+  idLimit?: number;
   limit?: number;
   query?: string;
   profileId?: number;
@@ -906,7 +907,9 @@ function handleRun(request: WorkerRequest): unknown {
     count: ids.length,
     elapsedMicros,
   };
-  if (request.includeIds !== false) response.ids = ids;
+  if (request.includeIds !== false) {
+    response.ids = request.idLimit && request.idLimit > 0 ? ids.slice(0, request.idLimit) : ids;
+  }
   return response;
 }
 

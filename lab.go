@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -10,6 +9,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+)
+
+const (
+	maxResponseIDs  = 10_000
+	minLookupWindow = time.Second
+	maxLookupWindow = 24 * time.Hour
 )
 
 type Lab struct {
@@ -320,6 +325,9 @@ func (l *Lab) runScenario(w http.ResponseWriter, scenario string, request Scenar
 	if request.Limit > 0 {
 		request.Limit = clampScenarioLimit(request.Limit, def)
 	}
+	if request.IncludeIDs && request.IDLimit <= 0 {
+		request.IDLimit = maxResponseIDs
+	}
 	language, algorithm, dataStructure, runtime, err := l.runtimeForScenario(scenario)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -347,6 +355,7 @@ func (l *Lab) runScenario(w http.ResponseWriter, scenario string, request Scenar
 	}
 	if request.IncludeIDs {
 		response.IDs = result.IDs
+		response.IDsTruncated = request.IDLimit > 0 && result.Count > len(result.IDs)
 	}
 	if !request.Since.IsZero() {
 		response.Since = request.Since
@@ -364,6 +373,7 @@ type ScenarioRunResponse struct {
 	Count          int            `json:"count"`
 	ElapsedMicros  int64          `json:"elapsedMicros"`
 	IDs            []int          `json:"ids,omitempty"`
+	IDsTruncated   bool           `json:"idsTruncated,omitempty"`
 	Request        map[string]any `json:"request,omitempty"`
 }
 
@@ -371,21 +381,28 @@ type RecentProfilesResponse = ScenarioRunResponse
 
 func parseSince(r *http.Request) (time.Time, error) {
 	query := r.URL.Query()
+	now := time.Now().UTC()
 	if window := strings.TrimSpace(query.Get("window")); window != "" {
 		duration, err := time.ParseDuration(window)
 		if err != nil {
 			return time.Time{}, fmt.Errorf("invalid window duration")
 		}
-		return time.Now().UTC().Add(-duration), nil
+		if duration < minLookupWindow || duration > maxLookupWindow {
+			return time.Time{}, fmt.Errorf("window must be between 1s and 24h")
+		}
+		return now.Add(-duration), nil
 	}
 
 	value := strings.TrimSpace(query.Get("since"))
 	if value == "" {
-		return time.Now().UTC().Add(-5 * time.Minute), nil
+		return now.Add(-5 * time.Minute), nil
 	}
 	parsed, err := time.Parse(time.RFC3339Nano, value)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("since must be an RFC3339 timestamp")
+	}
+	if parsed.Before(now.Add(-maxLookupWindow)) {
+		return now.Add(-maxLookupWindow), nil
 	}
 	return parsed.UTC(), nil
 }
@@ -469,8 +486,7 @@ func (l *Lab) handleImplementation(w http.ResponseWriter, r *http.Request) {
 		Algorithm     string `json:"algorithm"`
 		DataStructure string `json:"dataStructure"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json body")
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	if err := l.setImplementation(req.Scenario, req.Language, req.Algorithm, req.DataStructure); err != nil {
@@ -494,8 +510,7 @@ func (l *Lab) handleAlgorithm(w http.ResponseWriter, r *http.Request) {
 		Language      string `json:"language"`
 		DataStructure string `json:"dataStructure"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json body")
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	if req.DataStructure == "" {
@@ -519,8 +534,7 @@ func (l *Lab) handleLoadStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req LoadRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json body")
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	if err := l.loadGen.Start(req); err != nil {
@@ -548,8 +562,7 @@ func (l *Lab) handleLoadRate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Rate int `json:"rate"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json body")
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	if err := l.loadGen.UpdateRate(req.Rate); err != nil {

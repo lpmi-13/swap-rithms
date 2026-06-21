@@ -32,6 +32,7 @@ type ScenarioRequest struct {
 	Since         time.Time
 	SinceUnixNano string
 	IncludeIDs    bool
+	IDLimit       int
 	Limit         int
 	Query         string
 	ProfileID     int

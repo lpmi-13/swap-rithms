@@ -854,7 +854,9 @@ var indexHTML = []byte(`<!doctype html>
         const meta = div.querySelectorAll(".implementation-meta .badge");
         meta[0].textContent = implementation.algorithm.replaceAll("_", " ");
         meta[1].textContent = implementation.dataStructure.replaceAll("_", " ");
-        div.querySelector(".complexity").innerHTML = "<code>" + implementation.complexity + "</code>";
+        const complexityCode = document.createElement("code");
+        complexityCode.textContent = implementation.complexity;
+        div.querySelector(".complexity").replaceChildren(complexityCode);
         div.querySelector(".muted").textContent = implementation.description;
         list.appendChild(div);
       }
@@ -969,7 +971,13 @@ var indexHTML = []byte(`<!doctype html>
       }
 
       const endpoint = scenario.endpoint || "/profiles/recent";
-      $("loadHint").innerHTML = "Load calls <code>" + endpoint + "</code> for the selected scenario. The shown latency is measured from real implementation executions.";
+      const endpointCode = document.createElement("code");
+      endpointCode.textContent = endpoint;
+      $("loadHint").replaceChildren(
+        "Load calls ",
+        endpointCode,
+        " for the selected scenario. The shown latency is measured from real implementation executions."
+      );
     }
 
     function setFieldValidity(id, message) {

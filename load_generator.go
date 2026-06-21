@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+const maxLoadInFlight = 512
+
 type LoadRequest struct {
 	Rate            int    `json:"rate"`
 	DurationSeconds int    `json:"durationSeconds"`
@@ -33,6 +35,7 @@ type LoadGeneratorState struct {
 	Completed       uint64     `json:"completed"`
 	Errors          uint64     `json:"errors"`
 	InFlight        int64      `json:"inFlight"`
+	MaxInFlight     int        `json:"maxInFlight"`
 }
 
 type LoadGenerator struct {
@@ -43,9 +46,10 @@ type LoadGenerator struct {
 	state       LoadGeneratorState
 	rateChanged chan struct{}
 
-	completed atomic.Uint64
-	errors    atomic.Uint64
-	inFlight  atomic.Int64
+	completed  atomic.Uint64
+	errors     atomic.Uint64
+	inFlight   atomic.Int64
+	generation atomic.Uint64
 }
 
 func NewLoadGenerator(lab *Lab) *LoadGenerator {
@@ -85,13 +89,13 @@ func (g *LoadGenerator) Start(req LoadRequest) error {
 	if g.cancel != nil {
 		g.cancel()
 	}
+	generation := g.generation.Add(1)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	now := time.Now().UTC()
 	g.cancel = cancel
 	g.completed.Store(0)
 	g.errors.Store(0)
-	g.inFlight.Store(0)
 	state := LoadGeneratorState{
 		Running:         true,
 		Rate:            req.Rate,
@@ -100,6 +104,7 @@ func (g *LoadGenerator) Start(req LoadRequest) error {
 		IncludeIDs:      req.IncludeIDs,
 		Query:           req.Query,
 		StartedAt:       now,
+		MaxInFlight:     maxLoadInFlight,
 	}
 	if req.DurationSeconds > 0 {
 		stopsAt := now.Add(time.Duration(req.DurationSeconds) * time.Second)
@@ -107,7 +112,7 @@ func (g *LoadGenerator) Start(req LoadRequest) error {
 	}
 	g.state = state
 
-	go g.run(ctx, req)
+	go g.run(ctx, req, generation)
 	return nil
 }
 
@@ -133,11 +138,13 @@ func (g *LoadGenerator) Stop() {
 	if g.cancel != nil {
 		g.cancel()
 		g.cancel = nil
+		g.generation.Add(1)
 	}
 	g.state.Running = false
 	g.state.Completed = g.completed.Load()
 	g.state.Errors = g.errors.Load()
 	g.state.InFlight = g.inFlight.Load()
+	g.state.MaxInFlight = maxLoadInFlight
 	g.mu.Unlock()
 }
 
@@ -149,13 +156,14 @@ func (g *LoadGenerator) State() LoadGeneratorState {
 	state.Completed = g.completed.Load()
 	state.Errors = g.errors.Load()
 	state.InFlight = g.inFlight.Load()
+	state.MaxInFlight = maxLoadInFlight
 	if state.Running && state.StopsAt != nil && time.Now().UTC().After(*state.StopsAt) {
 		state.Running = false
 	}
 	return state
 }
 
-func (g *LoadGenerator) run(ctx context.Context, req LoadRequest) {
+func (g *LoadGenerator) run(ctx context.Context, req LoadRequest, generation uint64) {
 	var stop <-chan time.Time
 	var timer *time.Timer
 	if req.DurationSeconds > 0 {
@@ -174,14 +182,21 @@ func (g *LoadGenerator) run(ctx context.Context, req LoadRequest) {
 			return
 		case <-stop:
 			delay.Stop()
-			g.markStopped()
+			g.markStopped(generation)
 			return
 		case <-g.rateChanged:
 			delay.Stop()
 			continue
 		case <-delay.C:
+			if !g.isCurrentGeneration(generation) {
+				return
+			}
+			if g.inFlight.Load() >= maxLoadInFlight {
+				g.addError(generation)
+				continue
+			}
 			g.inFlight.Add(1)
-			go g.sendOne(ctx, client, req)
+			go g.sendOne(ctx, client, req, generation)
 		}
 	}
 }
@@ -218,33 +233,33 @@ func ratePeriod(rate int) time.Duration {
 	return period
 }
 
-func (g *LoadGenerator) sendOne(ctx context.Context, client *http.Client, req LoadRequest) {
-	defer g.inFlight.Add(-1)
+func (g *LoadGenerator) sendOne(ctx context.Context, client *http.Client, req LoadRequest, generation uint64) {
+	defer g.finishInFlight()
 
 	target, err := g.loadURL(req)
 	if err != nil {
-		g.errors.Add(1)
+		g.addError(generation)
 		return
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		g.errors.Add(1)
+		g.addError(generation)
 		return
 	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		g.errors.Add(1)
+		g.addError(generation)
 		return
 	}
 	defer resp.Body.Close()
 
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode >= 400 {
-		g.errors.Add(1)
+		g.addError(generation)
 		return
 	}
-	g.completed.Add(1)
+	g.addCompleted(generation)
 }
 
 func (g *LoadGenerator) scenarioForLoad() (string, *ScenarioDefinition) {
@@ -316,12 +331,39 @@ func (g *LoadGenerator) loadURL(req LoadRequest) (string, error) {
 	return target.String(), nil
 }
 
-func (g *LoadGenerator) markStopped() {
+func (g *LoadGenerator) markStopped(generation uint64) {
+	if !g.isCurrentGeneration(generation) {
+		return
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if !g.isCurrentGeneration(generation) {
+		return
+	}
 	g.cancel = nil
 	g.state.Running = false
 	g.state.Completed = g.completed.Load()
 	g.state.Errors = g.errors.Load()
 	g.state.InFlight = g.inFlight.Load()
+	g.state.MaxInFlight = maxLoadInFlight
+}
+
+func (g *LoadGenerator) isCurrentGeneration(generation uint64) bool {
+	return g.generation.Load() == generation
+}
+
+func (g *LoadGenerator) finishInFlight() {
+	g.inFlight.Add(-1)
+}
+
+func (g *LoadGenerator) addCompleted(generation uint64) {
+	if g.isCurrentGeneration(generation) {
+		g.completed.Add(1)
+	}
+}
+
+func (g *LoadGenerator) addError(generation uint64) {
+	if g.isCurrentGeneration(generation) {
+		g.errors.Add(1)
+	}
 }

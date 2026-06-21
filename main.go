@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -26,6 +27,10 @@ func main() {
 		Addr:              cfg.Addr,
 		Handler:           logRequests(mux),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      2 * time.Minute,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 << 10,
 	}
 
 	log.Printf("generated %d profiles", cfg.ProfileCount)
@@ -112,4 +117,30 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+const maxJSONBodyBytes int64 = 64 << 10
+
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, value any) bool {
+	defer r.Body.Close()
+
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxJSONBodyBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return false
+		}
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return false
+	}
+
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		writeError(w, http.StatusBadRequest, "request body must contain one json value")
+		return false
+	}
+
+	return true
 }
