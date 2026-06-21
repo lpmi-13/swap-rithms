@@ -135,7 +135,8 @@ Endpoints:
 - `GET /profiles/recent?window=5m&ids=true` returns IDs updated inside a recent time window.
 - `GET /profiles/recent?since=2026-06-20T12:00:00Z&ids=false` runs the lookup and returns only the count plus measured lookup time.
 - `POST /api/algorithm` with `{"language":"python","name":"binary_search"}` switches implementations.
-- `POST /api/load/start` with `{"rate":50,"durationSeconds":60,"windowSeconds":300}` starts load.
+- `POST /api/load/start` with `{"rate":50,"durationSeconds":0,"windowSeconds":300}` starts load indefinitely; set `durationSeconds` to a positive value to stop automatically.
+- `POST /api/load/rate` with `{"rate":100}` updates the active load generator rate without restarting it.
 - `POST /api/load/stop` stops load.
 - `GET /api/stats` returns UI metrics.
 - `GET /metrics` returns Prometheus-style counters and gauges.

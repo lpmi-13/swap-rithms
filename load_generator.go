@@ -20,24 +20,25 @@ type LoadRequest struct {
 }
 
 type LoadGeneratorState struct {
-	Running         bool      `json:"running"`
-	Rate            int       `json:"rate"`
-	DurationSeconds int       `json:"durationSeconds"`
-	WindowSeconds   int       `json:"windowSeconds"`
-	IncludeIDs      bool      `json:"includeIds"`
-	StartedAt       time.Time `json:"startedAt,omitempty"`
-	StopsAt         time.Time `json:"stopsAt,omitempty"`
-	Completed       uint64    `json:"completed"`
-	Errors          uint64    `json:"errors"`
-	InFlight        int64     `json:"inFlight"`
+	Running         bool       `json:"running"`
+	Rate            int        `json:"rate"`
+	DurationSeconds int        `json:"durationSeconds"`
+	WindowSeconds   int        `json:"windowSeconds"`
+	IncludeIDs      bool       `json:"includeIds"`
+	StartedAt       time.Time  `json:"startedAt,omitempty"`
+	StopsAt         *time.Time `json:"stopsAt,omitempty"`
+	Completed       uint64     `json:"completed"`
+	Errors          uint64     `json:"errors"`
+	InFlight        int64      `json:"inFlight"`
 }
 
 type LoadGenerator struct {
 	lab *Lab
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	state  LoadGeneratorState
+	mu          sync.Mutex
+	cancel      context.CancelFunc
+	state       LoadGeneratorState
+	rateChanged chan struct{}
 
 	completed atomic.Uint64
 	errors    atomic.Uint64
@@ -45,18 +46,18 @@ type LoadGenerator struct {
 }
 
 func NewLoadGenerator(lab *Lab) *LoadGenerator {
-	return &LoadGenerator{lab: lab}
+	return &LoadGenerator{
+		lab:         lab,
+		rateChanged: make(chan struct{}, 1),
+	}
 }
 
 func (g *LoadGenerator) Start(req LoadRequest) error {
-	if req.Rate <= 0 {
-		return errors.New("rate must be greater than zero")
+	if err := validateLoadRate(req.Rate); err != nil {
+		return err
 	}
-	if req.Rate > 2_000 {
-		return errors.New("rate must be 2000 req/s or lower")
-	}
-	if req.DurationSeconds <= 0 {
-		req.DurationSeconds = 60
+	if req.DurationSeconds < 0 {
+		return errors.New("duration must be zero for infinite runs or greater than zero")
 	}
 	if req.DurationSeconds > 600 {
 		return errors.New("duration must be 600 seconds or lower")
@@ -81,17 +82,38 @@ func (g *LoadGenerator) Start(req LoadRequest) error {
 	g.completed.Store(0)
 	g.errors.Store(0)
 	g.inFlight.Store(0)
-	g.state = LoadGeneratorState{
+	state := LoadGeneratorState{
 		Running:         true,
 		Rate:            req.Rate,
 		DurationSeconds: req.DurationSeconds,
 		WindowSeconds:   req.WindowSeconds,
 		IncludeIDs:      req.IncludeIDs,
 		StartedAt:       now,
-		StopsAt:         now.Add(time.Duration(req.DurationSeconds) * time.Second),
 	}
+	if req.DurationSeconds > 0 {
+		stopsAt := now.Add(time.Duration(req.DurationSeconds) * time.Second)
+		state.StopsAt = &stopsAt
+	}
+	g.state = state
 
 	go g.run(ctx, req)
+	return nil
+}
+
+func (g *LoadGenerator) UpdateRate(rate int) error {
+	if err := validateLoadRate(rate); err != nil {
+		return err
+	}
+
+	g.mu.Lock()
+	if g.cancel == nil || !g.state.Running {
+		g.mu.Unlock()
+		return errors.New("load is not running")
+	}
+	g.state.Rate = rate
+	g.mu.Unlock()
+
+	g.notifyRateChanged()
 	return nil
 }
 
@@ -116,38 +138,73 @@ func (g *LoadGenerator) State() LoadGeneratorState {
 	state.Completed = g.completed.Load()
 	state.Errors = g.errors.Load()
 	state.InFlight = g.inFlight.Load()
-	if state.Running && !state.StopsAt.IsZero() && time.Now().UTC().After(state.StopsAt) {
+	if state.Running && state.StopsAt != nil && time.Now().UTC().After(*state.StopsAt) {
 		state.Running = false
 	}
 	return state
 }
 
 func (g *LoadGenerator) run(ctx context.Context, req LoadRequest) {
-	period := time.Second / time.Duration(req.Rate)
-	if period <= 0 {
-		period = time.Nanosecond
+	var stop <-chan time.Time
+	var timer *time.Timer
+	if req.DurationSeconds > 0 {
+		timer = time.NewTimer(time.Duration(req.DurationSeconds) * time.Second)
+		stop = timer.C
+		defer timer.Stop()
 	}
-
-	ticker := time.NewTicker(period)
-	defer ticker.Stop()
-
-	timer := time.NewTimer(time.Duration(req.DurationSeconds) * time.Second)
-	defer timer.Stop()
 
 	client := &http.Client{Timeout: 10 * time.Second}
 
 	for {
+		delay := time.NewTimer(g.currentPeriod())
 		select {
 		case <-ctx.Done():
+			delay.Stop()
 			return
-		case <-timer.C:
+		case <-stop:
+			delay.Stop()
 			g.markStopped()
 			return
-		case <-ticker.C:
+		case <-g.rateChanged:
+			delay.Stop()
+			continue
+		case <-delay.C:
 			g.inFlight.Add(1)
 			go g.sendOne(ctx, client, req)
 		}
 	}
+}
+
+func (g *LoadGenerator) notifyRateChanged() {
+	select {
+	case g.rateChanged <- struct{}{}:
+	default:
+	}
+}
+
+func (g *LoadGenerator) currentPeriod() time.Duration {
+	g.mu.Lock()
+	rate := g.state.Rate
+	g.mu.Unlock()
+	return ratePeriod(rate)
+}
+
+func validateLoadRate(rate int) error {
+	if rate <= 0 {
+		return errors.New("rate must be greater than zero")
+	}
+	if rate > 10_000 {
+		return errors.New("rate must be 10000 req/s or lower")
+	}
+	return nil
+}
+
+func ratePeriod(rate int) time.Duration {
+	period := time.Second / time.Duration(rate)
+	if period <= 0 {
+		return time.Nanosecond
+	}
+	return period
 }
 
 func (g *LoadGenerator) sendOne(ctx context.Context, client *http.Client, req LoadRequest) {

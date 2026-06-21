@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -166,6 +167,100 @@ func TestParseSinceWindow(t *testing.T) {
 	}
 	if time.Since(since) < 9*time.Second || time.Since(since) > 11*time.Second {
 		t.Fatalf("window parse produced unexpected since: %s", since)
+	}
+}
+
+func TestLoadGeneratorRunsIndefinitelyByDefault(t *testing.T) {
+	generator := NewLoadGenerator(&Lab{selfURL: "http://127.0.0.1:1"})
+	if err := generator.Start(LoadRequest{Rate: 1, WindowSeconds: 1}); err != nil {
+		t.Fatal(err)
+	}
+	defer generator.Stop()
+
+	state := generator.State()
+	if !state.Running {
+		t.Fatal("expected generator to be running")
+	}
+	if state.DurationSeconds != 0 {
+		t.Fatalf("duration = %d, want 0 for infinite run", state.DurationSeconds)
+	}
+	if state.StopsAt != nil {
+		t.Fatalf("stopsAt = %v, want nil for infinite run", state.StopsAt)
+	}
+}
+
+func TestLoadGeneratorUsesOptionalDuration(t *testing.T) {
+	generator := NewLoadGenerator(&Lab{selfURL: "http://127.0.0.1:1"})
+	if err := generator.Start(LoadRequest{Rate: 1, DurationSeconds: 10, WindowSeconds: 1}); err != nil {
+		t.Fatal(err)
+	}
+	defer generator.Stop()
+
+	state := generator.State()
+	if !state.Running {
+		t.Fatal("expected generator to be running")
+	}
+	if state.DurationSeconds != 10 {
+		t.Fatalf("duration = %d, want 10", state.DurationSeconds)
+	}
+	if state.StopsAt == nil {
+		t.Fatal("expected stopsAt for timed run")
+	}
+}
+
+func TestLoadGeneratorUpdatesRateWhileRunning(t *testing.T) {
+	generator := NewLoadGenerator(&Lab{selfURL: "http://127.0.0.1:1"})
+	if err := generator.Start(LoadRequest{Rate: 1, WindowSeconds: 1}); err != nil {
+		t.Fatal(err)
+	}
+	defer generator.Stop()
+
+	if err := generator.UpdateRate(25); err != nil {
+		t.Fatal(err)
+	}
+	if state := generator.State(); state.Rate != 25 {
+		t.Fatalf("rate = %d, want 25", state.Rate)
+	}
+	if period := generator.currentPeriod(); period != 40*time.Millisecond {
+		t.Fatalf("period = %s, want 40ms", period)
+	}
+	if err := generator.UpdateRate(0); err == nil {
+		t.Fatal("expected invalid rate error")
+	}
+	if state := generator.State(); state.Rate != 25 {
+		t.Fatalf("invalid update changed rate to %d", state.Rate)
+	}
+}
+
+func TestLoadGeneratorAllowsTenThousandRequestsPerSecond(t *testing.T) {
+	if err := validateLoadRate(10_000); err != nil {
+		t.Fatalf("expected 10000 req/s to be valid: %v", err)
+	}
+	if err := validateLoadRate(10_001); err == nil {
+		t.Fatal("expected rate above 10000 req/s to be invalid")
+	}
+}
+
+func TestLoadRateHandlerUpdatesRunningGenerator(t *testing.T) {
+	dataset := NewDataset(100)
+	lab := NewLab(dataset, "http://127.0.0.1:1")
+	defer lab.Close()
+
+	if err := lab.loadGen.Start(LoadRequest{Rate: 1, WindowSeconds: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := mustRequest(t, "/api/load/rate")
+	req.Method = http.MethodPost
+	req.Body = io.NopCloser(strings.NewReader(`{"rate":40}`))
+	rec := httptest.NewRecorder()
+	lab.handleLoadRate(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if state := lab.loadGen.State(); state.Rate != 40 {
+		t.Fatalf("rate = %d, want 40", state.Rate)
 	}
 }
 

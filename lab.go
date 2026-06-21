@@ -72,6 +72,7 @@ func (l *Lab) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/state", l.handleState)
 	mux.HandleFunc("/api/algorithm", l.handleAlgorithm)
 	mux.HandleFunc("/api/load/start", l.handleLoadStart)
+	mux.HandleFunc("/api/load/rate", l.handleLoadRate)
 	mux.HandleFunc("/api/load/stop", l.handleLoadStop)
 	mux.HandleFunc("/api/stats", l.handleStats)
 	mux.HandleFunc("/metrics", l.handlePrometheusMetrics)
@@ -308,6 +309,26 @@ func (l *Lab) handleLoadStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	l.loadGen.Stop()
+	writeJSON(w, http.StatusOK, l.loadGen.State())
+}
+
+func (l *Lab) handleLoadRate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		Rate int `json:"rate"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if err := l.loadGen.UpdateRate(req.Rate); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, l.loadGen.State())
 }
 

@@ -89,6 +89,128 @@ var indexHTML = []byte(`<!doctype html>
       font: inherit;
     }
     input[type="number"] { width: 110px; }
+    .field {
+      position: relative;
+    }
+    .field input[aria-invalid="true"] {
+      border-color: var(--danger);
+      box-shadow: 0 0 0 2px rgba(173, 47, 47, 0.12);
+    }
+    .field-hint {
+      position: absolute;
+      z-index: 6;
+      top: calc(100% + 4px);
+      left: 0;
+      min-width: 190px;
+      max-width: 240px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--muted);
+      padding: 4px 6px;
+      font-size: 11px;
+      font-weight: 550;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(-4px);
+      transition:
+        opacity 180ms ease,
+        transform 180ms ease,
+        color 180ms ease,
+        border-color 180ms ease;
+    }
+    .field:focus-within .field-hint,
+    .field.invalid .field-hint {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .field.invalid .field-hint {
+      border-color: rgba(173, 47, 47, 0.45);
+      color: var(--danger);
+    }
+    .duration-option {
+      align-self: end;
+      position: relative;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      min-height: 36px;
+    }
+    .duration-toggle {
+      min-height: 36px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+      padding: 0 10px;
+      font-size: 12px;
+      font-weight: 650;
+      cursor: pointer;
+      user-select: none;
+    }
+    .duration-toggle::before {
+      content: "+";
+      color: var(--accent);
+      font-weight: 800;
+    }
+    .duration-option.open .duration-toggle::before {
+      content: "-";
+    }
+    .duration-panel {
+      position: absolute;
+      z-index: 5;
+      top: calc(100% + 8px);
+      left: 0;
+      width: 180px;
+      max-height: 0;
+      opacity: 0;
+      overflow: hidden;
+      pointer-events: none;
+      transform: translateY(-8px);
+      transition:
+        max-height 500ms cubic-bezier(0.22, 1, 0.36, 1),
+        opacity 500ms cubic-bezier(0.22, 1, 0.36, 1),
+        transform 500ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    .duration-option.open .duration-panel {
+      max-height: 120px;
+      opacity: 1;
+      overflow: visible;
+      pointer-events: auto;
+      transform: translateY(0);
+    }
+    .duration-panel label {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      padding: 8px;
+      box-shadow: 0 8px 20px rgba(23, 32, 42, 0.12);
+    }
+    .duration-panel .field-hint {
+      position: static;
+      min-width: 0;
+      max-width: none;
+      border: 0;
+      background: transparent;
+      padding: 0;
+      opacity: 1;
+      transform: none;
+      box-shadow: none;
+      pointer-events: none;
+    }
+    .form-message {
+      min-height: 17px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      transition: color 180ms ease;
+    }
+    .form-message.error {
+      color: var(--danger);
+    }
     button {
       min-height: 36px;
       border: 1px solid var(--accent);
@@ -213,6 +335,16 @@ var indexHTML = []byte(`<!doctype html>
       font-weight: 750;
       overflow-wrap: anywhere;
     }
+    #runtime {
+      display: flex;
+      flex-direction: column;
+      align-items: baseline;
+      gap: 2px;
+      overflow-wrap: normal;
+    }
+    #runtime .runtime-part {
+      white-space: nowrap;
+    }
     .charts {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
@@ -281,19 +413,28 @@ var indexHTML = []byte(`<!doctype html>
         <h2>Load generator</h2>
         <div class="grid">
           <div class="row">
-            <label>
+            <label id="rateField" class="field">
               Rate (requests/sec)
-              <input id="rate" type="number" min="1" max="2000" value="50">
+              <input id="rate" type="number" min="1" max="10000" value="50" aria-describedby="rateHint" aria-invalid="false">
+              <span id="rateHint" class="field-hint">Allowed range: 1 to 10,000 requests/sec.</span>
             </label>
-            <label>
-              Duration seconds
-              <input id="duration" type="number" min="1" max="600" value="60">
-            </label>
-            <label>
+            <label id="windowField" class="field">
               Recent window seconds
-              <input id="window" type="number" min="1" max="86400" value="300">
+              <input id="window" type="number" min="1" max="86400" value="300" aria-describedby="windowHint" aria-invalid="false">
+              <span id="windowHint" class="field-hint">Allowed range: 1 to 86,400 seconds.</span>
             </label>
+            <div id="durationOption" class="duration-option">
+              <button id="durationToggle" class="duration-toggle" type="button" aria-expanded="false" aria-controls="durationPanel">Run for set time</button>
+              <div id="durationPanel" class="duration-panel" aria-hidden="true">
+                <label id="durationField" class="field">
+                  Duration seconds
+                  <input id="duration" type="number" min="1" max="600" value="60" aria-describedby="durationHint" aria-invalid="false" disabled>
+                  <span id="durationHint" class="field-hint">Allowed range: 1 to 600 seconds.</span>
+                </label>
+              </div>
+            </div>
           </div>
+          <div id="loadFormMessage" class="form-message" role="status" aria-live="polite"></div>
           <label class="row" style="display:flex;font-size:13px;font-weight:500;color:var(--text)">
             <input id="includeIds" type="checkbox" style="min-height:auto">
             Include IDs in load responses
@@ -303,7 +444,7 @@ var indexHTML = []byte(`<!doctype html>
             <button id="stopLoad" class="danger">Stop</button>
             <span class="status"><span id="loadDot" class="dot"></span><span id="loadStatus">idle</span></span>
           </div>
-          <footer>Load requests hit <code>/profiles/recent</code> on this service, so the shown latency is measured from real algorithm executions.</footer>
+          <footer>Recent window sets the <code>/profiles/recent?window=</code> lookup and the chart history horizon. The shown latency is measured from real algorithm executions.</footer>
         </div>
       </div>
     </section>
@@ -317,7 +458,7 @@ var indexHTML = []byte(`<!doctype html>
 
     <section class="grid charts">
       <div class="panel">
-        <h2>Latency samples</h2>
+        <h2>p95 latency trend</h2>
         <canvas id="latencyChart" width="600" height="240"></canvas>
       </div>
       <div class="panel">
@@ -337,11 +478,20 @@ var indexHTML = []byte(`<!doctype html>
       languages: [],
       algorithms: [],
       rpsHistory: [],
-      latencyHistory: []
+      latencyHistory: [],
+      chartWindowSeconds: 300,
+      loadRunning: false,
+      rateUpdateTimer: 0
     };
 
     const $ = (id) => document.getElementById(id);
     const fmt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
+    const axisFmt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
+    const numericFields = {
+      rate: { label: "Rate", min: 1, max: 10000, unit: "requests/sec" },
+      window: { label: "Recent window", min: 1, max: 86400, unit: "seconds" },
+      duration: { label: "Duration", min: 1, max: 600, unit: "seconds" }
+    };
 
     async function api(path, options = {}) {
       const res = await fetch(path, {
@@ -442,12 +592,104 @@ var indexHTML = []byte(`<!doctype html>
 
     function renderLoad(load) {
       const running = Boolean(load.running);
+      state.loadRunning = running;
       $("loadDot").className = "dot" + (running ? " running" : "");
+      const timed = Number(load.durationSeconds || 0) > 0;
+      state.chartWindowSeconds = normalizeWindowSeconds(load.windowSeconds || $("window").value);
+      if (load.rate && document.activeElement !== $("rate") && !hasFieldError("rate")) {
+        $("rate").value = load.rate;
+      }
+      if (running) {
+        setTimedRunOpen(timed);
+        if (timed) $("duration").value = load.durationSeconds;
+        if (load.windowSeconds) $("window").value = load.windowSeconds;
+      }
       $("loadStatus").textContent = running
-        ? "running, " + load.completed + " complete, " + load.inFlight + " in flight"
+        ? "running " + (timed ? "for " + load.durationSeconds + "s" : "until stopped") + ", " + load.completed + " complete, " + load.inFlight + " in flight"
         : "idle, " + (load.completed || 0) + " complete";
       $("startLoad").disabled = running;
       $("stopLoad").disabled = !running;
+    }
+
+    function validateNumberInput(id, options = {}) {
+      const show = options.show !== false;
+      const input = $(id);
+      const config = numericFields[id];
+      const raw = input.value.trim();
+      let value = Number(raw);
+      let message = "";
+
+      if (raw === "") {
+        message = config.label + " is required.";
+      } else if (!Number.isFinite(value)) {
+        message = config.label + " must be a number.";
+      } else if (!Number.isInteger(value)) {
+        message = config.label + " must be a whole number.";
+      } else if (value < config.min) {
+        message = config.label + " must be at least " + fmt.format(config.min) + " " + config.unit + ".";
+      } else if (value > config.max) {
+        message = config.label + " must be at most " + fmt.format(config.max) + " " + config.unit + ".";
+      }
+
+      if (show) setFieldValidity(id, message);
+      return { ok: message === "", value, message };
+    }
+
+    function validateLoadForm() {
+      const rate = validateNumberInput("rate");
+      const windowValue = validateNumberInput("window");
+      const duration = $("durationOption").classList.contains("open")
+        ? validateNumberInput("duration")
+        : { ok: true, value: 0, message: "" };
+      const invalid = [rate, windowValue, duration].find((result) => !result.ok);
+      if (invalid) {
+        setLoadFormMessage(invalid.message, true);
+        return null;
+      }
+      setLoadFormMessage("");
+      return {
+        rate: rate.value,
+        windowSeconds: windowValue.value,
+        durationSeconds: duration.value
+      };
+    }
+
+    function setFieldValidity(id, message) {
+      const input = $(id);
+      const field = $(id + "Field");
+      const hint = $(id + "Hint");
+      field.classList.toggle("invalid", Boolean(message));
+      input.setAttribute("aria-invalid", String(Boolean(message)));
+      hint.textContent = message || fieldRangeMessage(id);
+    }
+
+    function clearFieldValidity(id) {
+      setFieldValidity(id, "");
+    }
+
+    function hasFieldError(id) {
+      return $(id).getAttribute("aria-invalid") === "true";
+    }
+
+    function anyFieldErrors() {
+      return ["rate", "window", "duration"].some((id) => hasFieldError(id));
+    }
+
+    function fieldRangeMessage(id) {
+      const config = numericFields[id];
+      return "Allowed range: " + fmt.format(config.min) + " to " + fmt.format(config.max) + " " + config.unit + ".";
+    }
+
+    function setLoadFormMessage(message, isError = false) {
+      const element = $("loadFormMessage");
+      element.textContent = message;
+      element.classList.toggle("error", isError);
+    }
+
+    function handleNumericInput(event) {
+      const result = validateNumberInput(event.target.id);
+      if (result.ok && !anyFieldErrors()) setLoadFormMessage("");
+      if (event.target.id === "rate") scheduleRateUpdate();
     }
 
     async function pollStats() {
@@ -459,56 +701,252 @@ var indexHTML = []byte(`<!doctype html>
       $("rps").textContent = fmt.format(active.recentRps || 0) + " rps";
       $("p95").textContent = fmt.format(active.p95Ms || 0) + " ms";
       $("p99").textContent = fmt.format(active.p99Ms || 0) + " ms";
-      const cpu = data.runtime.cpuPercent >= 0 ? ", " + fmt.format(data.runtime.cpuPercent) + "% CPU" : "";
-      $("runtime").textContent = fmt.format(data.runtime.heapMb || 0) + " MB" + cpu;
+      renderRuntimeStats(data.runtime);
       renderLoad(data.load);
 
-      state.rpsHistory.push(active.recentRps || 0);
-      if (state.rpsHistory.length > 80) state.rpsHistory.shift();
+      const now = Date.now();
+      state.rpsHistory = appendHistory(state.rpsHistory, { at: now, value: active.recentRps || 0 }, state.chartWindowSeconds);
+      state.latencyHistory = appendHistory(state.latencyHistory, { at: now, value: active.p95Ms || 0 }, state.chartWindowSeconds);
 
-      const recent = data.recentEvents || [];
-      state.latencyHistory = recent.slice(-80).map((event) => event.latencyMs);
       drawLineChart($("latencyChart"), state.latencyHistory, "ms");
       drawLineChart($("rpsChart"), state.rpsHistory, "rps");
+    }
+
+    function appendHistory(history, point, windowSeconds) {
+      const cutoff = point.at - windowSeconds * 1000;
+      return history.concat(point).filter((entry) => entry.at >= cutoff);
+    }
+
+    function normalizeWindowSeconds(value) {
+      const seconds = Number(value);
+      if (!Number.isFinite(seconds) || seconds <= 0) return 300;
+      return Math.min(Math.max(Math.round(seconds), 1), 24 * 60 * 60);
+    }
+
+    function setTimedRunOpen(open) {
+      $("durationOption").classList.toggle("open", open);
+      $("durationToggle").setAttribute("aria-expanded", String(open));
+      $("durationPanel").setAttribute("aria-hidden", String(!open));
+      $("duration").disabled = !open;
+      if (open) validateNumberInput("duration");
+      else {
+        clearFieldValidity("duration");
+        if (!anyFieldErrors()) setLoadFormMessage("");
+      }
+    }
+
+    function scheduleRateUpdate() {
+      if (!state.loadRunning) return;
+      window.clearTimeout(state.rateUpdateTimer);
+
+      const result = validateNumberInput("rate");
+      if (!result.ok) {
+        setLoadFormMessage(result.message, true);
+        return;
+      }
+      setLoadFormMessage("");
+
+      state.rateUpdateTimer = window.setTimeout(() => updateLoadRate(result.value), 250);
+    }
+
+    async function updateLoadRate(rate) {
+      if (!state.loadRunning) return;
+      const latest = validateNumberInput("rate");
+      if (!latest.ok || latest.value !== rate) return;
+      try {
+        const load = await api("/api/load/rate", {
+          method: "POST",
+          body: JSON.stringify({ rate })
+        });
+        clearFieldValidity("rate");
+        setLoadFormMessage("Target rate updated to " + fmt.format(rate) + " requests/sec.");
+        renderLoad(load);
+      } catch (err) {
+        console.error(err);
+        setFieldValidity("rate", err.message);
+        setLoadFormMessage(err.message, true);
+        await pollStats();
+      }
+    }
+
+    function renderRuntimeStats(runtime) {
+      const value = $("runtime");
+      const memory = document.createElement("span");
+      memory.className = "runtime-part";
+      memory.textContent = fmt.format(runtime.heapMb || 0) + " MB" + (runtime.cpuPercent >= 0 ? "," : "");
+
+      value.replaceChildren(memory);
+      if (runtime.cpuPercent >= 0) {
+        const cpu = document.createElement("span");
+        cpu.className = "runtime-part";
+        cpu.textContent = fmt.format(runtime.cpuPercent) + "% CPU";
+        value.appendChild(cpu);
+      }
     }
 
     function drawLineChart(canvas, values, suffix) {
       const ctx = canvas.getContext("2d");
       const w = canvas.width;
       const h = canvas.height;
+      const points = normalizeSeries(values);
+      const chart = { top: 18, right: 14, bottom: 34, left: 56 };
+      const plotW = Math.max(1, w - chart.left - chart.right);
+      const plotH = Math.max(1, h - chart.top - chart.bottom);
+      const bottom = h - chart.bottom;
+      const maxValue = Math.max(...points.map((point) => point.value), 0);
+      const yTicks = yAxisTicks(maxValue);
+      const yMax = yTicks[yTicks.length - 1] || 1;
+
       ctx.clearRect(0, 0, w, h);
       ctx.fillStyle = "#fff";
       ctx.fillRect(0, 0, w, h);
+      ctx.font = "11px system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
+      ctx.textBaseline = "middle";
       ctx.strokeStyle = "#d8dee8";
       ctx.lineWidth = 1;
-      for (let i = 1; i < 4; i++) {
-        const y = Math.round((h / 4) * i);
+
+      for (const tick of yTicks) {
+        const y = bottom - (tick / yMax) * plotH;
         ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(w, y);
+        ctx.moveTo(chart.left, y);
+        ctx.lineTo(w - chart.right, y);
         ctx.stroke();
+        ctx.fillStyle = "#5f6b7a";
+        ctx.textAlign = "right";
+        ctx.fillText(formatAxisNumber(tick), chart.left - 8, y);
       }
 
-      if (!values.length) {
+      const xIndexes = xTickIndexes(points.length, Math.max(2, Math.min(5, Math.floor(plotW / 110) + 1)));
+      for (let i = 0; i < xIndexes.length; i++) {
+        const index = xIndexes[i];
+        const x = xForIndex(index, points.length, chart.left, plotW);
+        ctx.strokeStyle = "#eef2f7";
+        ctx.beginPath();
+        ctx.moveTo(x, chart.top);
+        ctx.lineTo(x, bottom);
+        ctx.stroke();
+        ctx.strokeStyle = "#d8dee8";
+        ctx.beginPath();
+        ctx.moveTo(x, bottom);
+        ctx.lineTo(x, bottom + 4);
+        ctx.stroke();
         ctx.fillStyle = "#5f6b7a";
-        ctx.fillText("No samples yet", 18, 28);
+        ctx.textAlign = i === 0 ? "left" : i === xIndexes.length - 1 ? "right" : "center";
+        ctx.textBaseline = "top";
+        ctx.fillText(formatXTick(points[index]), x, bottom + 8);
+      }
+
+      ctx.strokeStyle = "#5f6b7a";
+      ctx.beginPath();
+      ctx.moveTo(chart.left, chart.top);
+      ctx.lineTo(chart.left, bottom);
+      ctx.lineTo(w - chart.right, bottom);
+      ctx.stroke();
+
+      if (!points.length) {
+        ctx.fillStyle = "#5f6b7a";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText("No samples yet", chart.left + 10, chart.top + 12);
         return;
       }
 
-      const max = Math.max(...values, 1);
-      const pad = 18;
       ctx.strokeStyle = "#1666c1";
       ctx.lineWidth = 2;
       ctx.beginPath();
-      values.forEach((value, i) => {
-        const x = pad + (i / Math.max(values.length - 1, 1)) * (w - pad * 2);
-        const y = h - pad - (value / max) * (h - pad * 2);
+      points.forEach((point, i) => {
+        const x = xForIndex(i, points.length, chart.left, plotW);
+        const y = bottom - (point.value / yMax) * plotH;
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       });
       ctx.stroke();
+      if (points.length === 1) {
+        const x = xForIndex(0, points.length, chart.left, plotW);
+        const y = bottom - (points[0].value / yMax) * plotH;
+        ctx.fillStyle = "#1666c1";
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
       ctx.fillStyle = "#17202a";
-      ctx.fillText("max " + fmt.format(max) + " " + suffix, 18, 24);
+      ctx.textAlign = "right";
+      ctx.textBaseline = "top";
+      ctx.fillText("max " + formatAxisNumber(maxValue) + " " + suffix, w - chart.right, 6);
+    }
+
+    function normalizeSeries(series) {
+      return series.map((point, index) => {
+        if (typeof point === "number") {
+          return { value: Number.isFinite(point) ? point : 0, at: NaN, index };
+        }
+        const value = Number(point.value);
+        const at = typeof point.at === "number" ? point.at : Date.parse(point.at);
+        return {
+          value: Number.isFinite(value) ? value : 0,
+          at: Number.isFinite(at) ? at : NaN,
+          index
+        };
+      });
+    }
+
+    function yAxisTicks(maxValue) {
+      const safeMax = Number.isFinite(maxValue) && maxValue > 0 ? maxValue : 1;
+      const step = niceStep(safeMax / 4);
+      const maxTick = Math.max(step, Math.ceil(safeMax / step) * step);
+      const ticks = [];
+      for (let value = 0; value <= maxTick + step / 2; value += step) {
+        ticks.push(roundTick(value));
+      }
+      return ticks;
+    }
+
+    function niceStep(value) {
+      const magnitude = Math.pow(10, Math.floor(Math.log10(value)));
+      const fraction = value / magnitude;
+      const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 5 ? 5 : 10;
+      return niceFraction * magnitude;
+    }
+
+    function roundTick(value) {
+      if (value === 0) return 0;
+      const precision = Math.max(0, 2 - Math.floor(Math.log10(Math.abs(value))));
+      return Number(value.toFixed(precision));
+    }
+
+    function xTickIndexes(length, target) {
+      if (length <= 0) return [];
+      if (length === 1) return [0];
+      const count = Math.min(length, target);
+      const indexes = [];
+      for (let i = 0; i < count; i++) {
+        const index = Math.round((i * (length - 1)) / (count - 1));
+        if (!indexes.includes(index)) indexes.push(index);
+      }
+      return indexes;
+    }
+
+    function xForIndex(index, length, left, width) {
+      if (length <= 1) return left + width / 2;
+      return left + (index / (length - 1)) * width;
+    }
+
+    function formatAxisNumber(value) {
+      if (!Number.isFinite(value)) return "0";
+      const abs = Math.abs(value);
+      if (abs > 0 && abs < 0.01) return value.toExponential(1);
+      if (abs > 0 && abs < 1) return value.toFixed(2).replace(/\.?0+$/, "");
+      return axisFmt.format(value);
+    }
+
+    function formatXTick(point) {
+      if (point && Number.isFinite(point.at)) {
+        const date = new Date(point.at);
+        return [date.getHours(), date.getMinutes(), date.getSeconds()]
+          .map((part) => String(part).padStart(2, "0"))
+          .join(":");
+      }
+      return String((point && point.index + 1) || 1);
     }
 
     $("applyAlgorithm").addEventListener("click", async () => {
@@ -529,20 +967,38 @@ var indexHTML = []byte(`<!doctype html>
       updateAlgorithmCards();
     });
 
+    $("durationToggle").addEventListener("click", () => {
+      setTimedRunOpen(!$("durationOption").classList.contains("open"));
+    });
+
+    for (const id of ["rate", "window", "duration"]) {
+      $(id).addEventListener("input", handleNumericInput);
+      $(id).addEventListener("change", handleNumericInput);
+    }
+
     $("startLoad").addEventListener("click", async () => {
-      await api("/api/load/start", {
-        method: "POST",
-        body: JSON.stringify({
-          rate: Number($("rate").value),
-          durationSeconds: Number($("duration").value),
-          windowSeconds: Number($("window").value),
-          includeIds: $("includeIds").checked
-        })
-      });
-      await pollStats();
+      const form = validateLoadForm();
+      if (!form) return;
+      try {
+        await api("/api/load/start", {
+          method: "POST",
+          body: JSON.stringify({
+            rate: form.rate,
+            durationSeconds: form.durationSeconds,
+            windowSeconds: form.windowSeconds,
+            includeIds: $("includeIds").checked
+          })
+        });
+        setLoadFormMessage("");
+        await pollStats();
+      } catch (err) {
+        console.error(err);
+        setLoadFormMessage(err.message, true);
+      }
     });
 
     $("stopLoad").addEventListener("click", async () => {
+      window.clearTimeout(state.rateUpdateTimer);
       await api("/api/load/stop", { method: "POST", body: "{}" });
       await pollStats();
     });
